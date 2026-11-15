@@ -42,6 +42,7 @@ import {
 } from '../services/blueprintGenerator.ts';
 import { probeEncoders } from '../services/encoderProbe.ts';
 import { isGeminiConfigured } from '../services/geminiClient.ts';
+import { getOllamaVisionStatus } from '../services/ollamaVision.ts';
 import { processUploadedMedia } from '../services/imageProcessor.ts';
 import {
   copySampleImagesToDir,
@@ -229,7 +230,7 @@ function sanitizeMotionIntensity(val: unknown): MotionIntensity {
 }
 
 function sanitizeMatchingPreference(val: unknown): MatchingPreference {
-  if (val === 'gemini' || val === 'local') return val;
+  if (val === 'gemini' || val === 'ollama' || val === 'local') return val;
   return 'auto';
 }
 
@@ -458,10 +459,13 @@ export function createStudioRouter(): express.Router {
   // 1. Probe system capabilities
   router.get('/capabilities', async (_req, res) => {
     try {
-      const encoderInfo = await probeEncoders();
+      const [encoderInfo, ollama] = await Promise.all([probeEncoders(), getOllamaVisionStatus()]);
       res.json({
         ffmpegVersion: encoderInfo.ffmpegVersion,
         geminiConfigured: isGeminiConfigured(),
+        ollamaVisionAvailable: ollama.available,
+        ollamaVisionModel: ollama.model,
+        ollamaVisionHelp: ollama.reason,
         availableEncoders: encoderInfo.availableEncoders,
         recommendedEncoder: encoderInfo.recommendedEncoder,
       });
@@ -723,6 +727,11 @@ export function createStudioRouter(): express.Router {
           pauses: audioAnalysis.pauses,
           images: processedMedia,
           matchingPreference,
+          visionCacheDir: path.join(WORKSPACE_ROOT, '_vision_cache'),
+          onVisualProgress: (completed, total) => {
+            jobState.progress = Math.round(72 + (completed / Math.max(1, total)) * 18);
+            jobState.message = `AI inspecting picture ${completed} of ${total} and matching to narration...`;
+          },
           pacingMode,
           graphicCardTheme,
         });
