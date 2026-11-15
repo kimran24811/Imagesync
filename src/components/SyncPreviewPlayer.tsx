@@ -36,6 +36,7 @@ import {
   type ActiveSfxCue,
 } from '../utils/sfxSchedule';
 import { formatDurationSec, formatTimecodeMs } from '../utils/time';
+import { planDirectorTransitions } from '../utils/directorTransitions';
 
 interface SyncPreviewPlayerProps {
   session: ProjectSession;
@@ -200,6 +201,31 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
   }, [session.scenes, currentTimeMs]);
 
   const activeMedia = activeScene ? imagesById.get(activeScene.imageId) : undefined;
+  const boundaries = useMemo(() => planDirectorTransitions(session.scenes,
+    session.scenes.map(s => Math.max(1, Math.round(s.endMs * 30 / 1000) - Math.round(s.startMs * 30 / 1000))),
+    session.transitionStyle, session.transitionDurationMs),
+    [session.scenes, session.transitionStyle, session.transitionDurationMs]);
+  const incomingBoundary = activeScene && activeScene.index > 0 ? boundaries[activeScene.index - 1] : undefined;
+  const sceneElapsedMs = activeScene ? Math.max(0, currentTimeMs - activeScene.startMs) : 0;
+
+  // Seek the voiceover when the storyboard changes the external playhead.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (audio && Math.abs(audio.currentTime * 1000 - currentTimeMs) > 150) {
+      audio.currentTime = currentTimeMs / 1000;
+      firedCueIdsRef.current.clear();
+      lastSfxTimeRef.current = currentTimeMs - 1;
+      const music = musicRef.current;
+      if (music && Number.isFinite(music.duration) && music.duration > 0) {
+        music.currentTime = currentTimeMs / 1000 % music.duration;
+      }
+    }
+    const video = videoRef.current;
+    if (video && Number.isFinite(video.duration) && video.duration > 0) {
+      const expected = sceneElapsedMs / 1000 % video.duration;
+      if (Math.abs(video.currentTime - expected) > 0.1) video.currentTime = expected;
+    }
+  }, [currentTimeMs, sceneElapsedMs, activeScene?.id]);
 
   const voiceLockedCount = useMemo(
     () => session.scenes.filter((s) => s.alignmentSource === 'voice-locked').length,
@@ -411,7 +437,7 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
       : `kb-anim-${activeScene.kenBurnsDirection}`;
 
   const kbDurationSec = activeScene
-    ? Math.max(0.45, activeScene.durationMs / 1000)
+    ? Math.max(1 / 30, (activeScene.endMs - activeScene.startMs) / 1000)
     : 2.2;
 
   const focalCropTransform = getFocalCropTransform(activeScene?.focalCrop);
@@ -751,6 +777,10 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
               {session.sfxConfig.enabled ? `${scheduledSfxEvents.length} SFX cues` : 'SFX muted'}
             </span>
           </p>
+          <p className="mt-1 text-xs text-[#64748B]">
+            Live preview approximates motion, transitions and audio mixing. Check the exported MP4 for final appearance.
+            {voiceLockedCount === 0 && ' Speech and word timings are estimated; review captions against your voiceover.'}
+          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -926,6 +956,12 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
                 loop
                 playsInline
                 autoPlay={isPlaying}
+                onLoadedMetadata={(event) => {
+                  const video = event.currentTarget;
+                  if (Number.isFinite(video.duration) && video.duration > 0) {
+                    video.currentTime = sceneElapsedMs / 1000 % video.duration;
+                  }
+                }}
                 className="h-full w-full object-cover"
               />
             ) : (
@@ -945,7 +981,8 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
                   style={{
                     objectPosition: focalCropTransform.objectPosition,
                     animationDuration: `${kbDurationSec}s`,
-                    animationPlayState: isPlaying ? 'running' : 'paused',
+                    animationDelay: `-${sceneElapsedMs / 1000}s`,
+                    animationPlayState: 'paused',
                   }}
                   className={`h-full w-full object-cover ${kbClass}`}
                 />
@@ -961,11 +998,11 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
           )}
 
           {/* Brief Whip-Flash Cut Burst on Dynamic Transitions */}
-          {session.transitionStyle === 'whip-dynamic' && activeScene && activeScene.index > 0 && (
+          {incomingBoundary?.kind === 'flash' && sceneElapsedMs < incomingBoundary.overlapFrames * 1000 / 30 && (
             <div
-              key={`flash_${activeScene.id}`}
+              style={{ opacity: 0.42 * (1 - sceneElapsedMs / (incomingBoundary.overlapFrames * 1000 / 30)) }}
               aria-hidden="true"
-              className="whip-flash-overlay pointer-events-none absolute inset-0 bg-white/40"
+              className="pointer-events-none absolute inset-0 bg-white"
             />
           )}
 

@@ -144,7 +144,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                     Master MP4 Ready ({formatBytes(jobState.fileSizeBytes)})
                   </p>
                   <p className="mt-0.5">
-                    H.264 30fps · AAC 192kbps · Exact audio millisecond sync
+                    H.264 30fps · AAC 192kbps · Validated audio and video coverage
                   </p>
                 </div>
 
@@ -185,12 +185,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 </div>
               )}
 
-              {cachedUrl && !isDownloading && (
+              {!isDownloading && (
                 <div className="border-t border-[#E2E8F0] pt-3">
                   <video
                     controls
                     playsInline
-                    src={cachedUrl}
+                    src={cachedUrl || jobState.outputUrl}
                     className="max-h-56 w-full rounded-md bg-black"
                   />
                 </div>

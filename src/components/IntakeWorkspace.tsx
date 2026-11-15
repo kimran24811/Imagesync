@@ -367,7 +367,7 @@ export const IntakeWorkspace: React.FC<IntakeWorkspaceProps> = ({
                       Drop voiceover file or browse
                     </p>
                     <p className="text-xs text-[#64748B]">
-                      Detects exact spoken word timestamps & pauses
+                      Measures audio duration and detects pauses
                     </p>
                   </div>
                 )}
