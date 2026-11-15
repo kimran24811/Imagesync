@@ -1,3 +1,4 @@
+import { matchNarrative } from './narrativeMatcher.ts';
 import fs from 'node:fs/promises';
 import { Type } from '@google/genai';
 import type {
@@ -862,7 +863,7 @@ export function smartTokenizeScript(rawScript: string, targetCount: number): str
   return clauses;
 }
 
-function alignWithVisualCaptions(
+async function alignWithVisualCaptions(
   cleanScript: string,
   audioDurationMs: number,
   pauses: SpeechPause[],
@@ -872,15 +873,13 @@ function alignWithVisualCaptions(
   cardTheme: GraphicCardTheme,
   imageSummaries: Record<string, string>,
   engineUsed: 'gemini-vision' | 'ollama-vision'
-): AlignScenesOutput {
+): Promise<AlignScenesOutput> {
   const clauses = smartTokenizeScript(cleanScript, targetBeatCount);
-  const matches = matchCaptionsToScriptBeats(
-    clauses,
-    images.map((image) => ({
-      id: image.id,
-      description: imageSummaries[image.id] || '',
-    }))
-  );
+  const descriptions=images.map(image=>({id:image.id,description:imageSummaries[image.id]||''}));
+  let matches;
+  let reasoningNotice='';
+  try {matches=await matchNarrative(clauses,descriptions,engineUsed);}
+  catch {matches=matchCaptionsToScriptBeats(clauses,descriptions);reasoningNotice=' Narrative reasoning was unavailable; assignments use local description similarity and report confidence.';}
   const rawDrafts: SceneTimingDraft[] = clauses.map((clause, idx) => {
     const match = matches[idx];
     const words = clause.trim().split(/\s+/);
@@ -910,9 +909,9 @@ function alignWithVisualCaptions(
     scenes,
     imageSummaries,
     engineUsed,
-    fallbackNotice: lowConfidence
+    fallbackNotice: (lowConfidence
       ? `Visual AI analyzed all ${images.length} images, but ${lowConfidence} of ${scenes.length} beats have low match confidence. Review those image assignments in Storyboard before export. Speech positions remain estimated from narration duration and detected pauses.`
-      : `Visual AI analyzed all ${images.length} images without needing filenames or numbers. Speech positions are estimated from narration duration and detected pauses.`,
+      : `Visual AI analyzed all ${images.length} images without needing filenames or numbers. Speech positions are estimated from narration duration and detected pauses.`) + reasoningNotice,
   };
 }
 
