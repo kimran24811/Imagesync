@@ -1,0 +1,6 @@
+{
+  "name": "SceneSync Studio",
+  "description": "Automated local AI video creation studio that aligns voiceover audio, multilingual scripts, and unsorted photo folders into synchronized 1080p MP4 videos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
