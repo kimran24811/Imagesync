@@ -21,6 +21,7 @@ import {
   inferDefaultSfxCue,
 } from '../../src/utils/sfxSchedule.ts';
 import { getGeminiClient, isGeminiConfigured } from './geminiClient.ts';
+import { orderMediaByShotNumber, selectMediaForBeat } from '../../src/utils/orderedMedia.ts';
 
 export interface InternalMediaPayload {
   id: string;
@@ -281,11 +282,15 @@ export async function alignScriptAndImages(
     return {
       ...fallback,
       fallbackNotice:
-        'GEMINI_API_KEY is not configured in the environment; running deterministic rapid-beat visual & cadence matching.',
+        'Gemini is not configured. Images are placed in numbered shot / upload order, NOT matched by visual content. Review the storyboard and make sure the narration script exactly matches the audio.',
     };
   }
 
-  return fallback;
+  return {
+    ...fallback,
+    fallbackNotice:
+      'Offline shot-order matching: Scene 1 uses the first numbered/uploaded image, scene 2 the next, etc. Visual contents were not analyzed; review scene assignments and ensure the audio matches the pasted script.',
+  };
 }
 
 /**
@@ -877,7 +882,7 @@ function alignWithLocalHeuristic(
   cardTheme: GraphicCardTheme
 ): AlignScenesOutput {
   const clauses = smartTokenizeScript(cleanScript, targetBeatCount);
-  const usedImageIds = new Set<string>();
+  const orderedImages = orderMediaByShotNumber(images);
   const imageSummaries: Record<string, string> = {};
 
   for (const img of images) {
@@ -897,40 +902,9 @@ function alignWithLocalHeuristic(
       .map((t) => t.replace(/[^a-z0-9]/g, ''))
       .filter(Boolean);
 
-    const expandedTokens = new Set<string>(tokens);
-    for (const tok of tokens) {
-      const mapped = ROMAN_URDU_CONCEPT_MAP[tok];
-      if (mapped) {
-        for (const m of mapped) expandedTokens.add(m);
-      }
-    }
-
-    let bestImg = images[idx % images.length];
-    let bestScore = -1;
-    let matchedKeyword = '';
-
-    for (const img of images) {
-      const nameTokens = img.originalName
-        .toLowerCase()
-        .replace(/\.[^.]+$/, '')
-        .split(/[^a-z0-9]+/)
-        .filter((t) => t.length >= 2);
-
-      let score = usedImageIds.has(img.id) ? 0 : 1.5;
-      for (const nt of nameTokens) {
-        if (expandedTokens.has(nt) || expandedTokens.has(nt + 's') || expandedTokens.has(nt.replace(/s$/, ''))) {
-          score += 6;
-          matchedKeyword = nt;
-        }
-      }
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestImg = img;
-      }
-    }
-
-    usedImageIds.add(bestImg.id);
+    // Offline mode has no computer vision. Preserve the intended shot sequence;
+    // filename keyword scoring often assigned the wrong crow, pot, and action.
+    const bestImg = selectMediaForBeat(orderedImages, idx, clauses.length);
 
     let emotionalWeight = 1.0;
     if (/[!?]/.test(clause) || /\d/.test(clause)) emotionalWeight = 1.2;
@@ -942,9 +916,7 @@ function alignWithLocalHeuristic(
     return {
       text: clause,
       imageId: bestImg.id,
-      matchReason: matchedKeyword
-        ? `Matched "${matchedKeyword}" -> ${bestImg.originalName}`
-        : `Rapid micro-beat pacing across visuals (${bestImg.originalName})`,
+      matchReason: `Offline shot order ${orderedImages.indexOf(bestImg) + 1}/${orderedImages.length}: ${bestImg.originalName} (not visual AI matching)`,
       emotionalWeight,
       kenBurnsDirection: sanitizeDirection(undefined, idx, 'media'),
       beatKind: 'media',
