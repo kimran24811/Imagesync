@@ -124,7 +124,7 @@ export interface StoryBlueprint {
   continuityPrefix: string;
   fullScript: string;
   scenes: BlueprintScene[];
-  engineUsed: 'gemini-4-hydrogen' | 'local-template';
+  engineUsed: 'gemini' | 'local-template';
   fallbackNotice?: string;
 }
 
@@ -225,7 +225,7 @@ export interface ProjectSession {
   accentColor: AccentColorId;
   brandKicker: string;
   sfxConfig: SfxConfig;
-  matchingEngineUsed: 'gemini-4-hydrogen' | 'gemini-vision' | 'ollama-vision' | 'local-heuristic';
+  matchingEngineUsed: 'gemini' | 'gemini-vision' | 'ollama-vision' | 'local-heuristic';
   fallbackNotice?: string;
   audio: UploadedAudio;
   backgroundMusic?: BackgroundMusicTrack;
