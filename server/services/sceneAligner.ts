@@ -199,13 +199,15 @@ export function computeTargetBeatCount(
   mediaCount: number,
   pacingMode: PacingMode
 ): number {
+  // Guard against more cuts than the soundtrack can support (minimum 480ms/beat).
+  const maxSafeBeats = Math.max(1, Math.floor(audioDurationMs / 480));
   if (pacingMode === 'upload-match') {
-    return Math.max(1, mediaCount);
+    return Math.max(1, Math.min(mediaCount, maxSafeBeats));
   }
   const msPerBeat = pacingMode === 'rapid-reel' ? 1350 : 1950;
   const maxBeats = pacingMode === 'rapid-reel' ? 72 : 55;
   const cadenceTarget = Math.max(4, Math.round(audioDurationMs / msPerBeat));
-  return Math.max(mediaCount, Math.min(maxBeats, cadenceTarget));
+  return Math.max(1, Math.min(maxSafeBeats, Math.max(mediaCount, Math.min(maxBeats, cadenceTarget))));
 }
 
 export async function alignScriptAndImages(
@@ -306,9 +308,10 @@ function diversifyConsecutiveBeats(
     'bottom-detail',
   ];
   let cropCursor = 0;
+  let previousFinal: typeof drafts[number] | null = null;
 
   return drafts.map((draft, idx) => {
-    const prev = idx > 0 ? drafts[idx - 1] : null;
+    const prev = previousFinal;
     let beatKind: BeatKind = draft.beatKind ?? 'media';
     let focalCrop: FocalCropRegion = draft.focalCrop ?? 'full';
     let graphicCard = draft.graphicCard;
@@ -382,7 +385,7 @@ function diversifyConsecutiveBeats(
           ? 'shutter'
           : draft.sfxCue;
 
-    return {
+    const finalized = {
       ...draft,
       beatKind,
       focalCrop,
@@ -390,6 +393,8 @@ function diversifyConsecutiveBeats(
       kenBurnsDirection,
       sfxCue,
     };
+    previousFinal = finalized;
+    return finalized;
   });
 }
 
