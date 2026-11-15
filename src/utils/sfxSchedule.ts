@@ -69,6 +69,16 @@ export function computeSfxSchedule(
 
   for (let i = 0; i < scenes.length; i++) {
     const scene = scenes[i];
+    if (scene.motion) {
+      for (const event of scene.motion.cues) {
+        if(event.cue==='none') continue;
+        const impact=event.cue==='impact'||event.cue==='thud';
+        const transition=event.cue==='whoosh'||event.cue==='flashwhoosh';
+        if(impact && i===0 && !config.includeHookImpact || transition && !config.includeTransitionWhoosh || !impact && !transition && !config.includeTextPop) continue;
+        events.push({id:`${scene.id}_motion_${event.role}`,cue:event.cue,atMs:Math.max(0,Math.min(maxAtMs,event.atMs))});
+      }
+      continue;
+    }
     const cue = scene.sfxCue;
 
     if (cue === 'none') continue;
@@ -171,10 +181,10 @@ export function computeSfxSchedule(
     const lane = ev.cue === 'impact' || ev.cue === 'thud' ? 'impact'
       : ev.cue === 'whoosh' || ev.cue === 'flashwhoosh' || ev.cue === 'shutter'
         ? 'transition' : 'detail';
-    if (ev.atMs - (lastCueAt.get(ev.cue) ?? -Infinity) < 125) continue;
+    if (ev.atMs - (lastCueAt.get(ev.cue) ?? -Infinity) < (scenes.some(s=>s.motion)?320:125)) continue;
     if (ev.atMs - (lastLaneAt.get(lane) ?? -Infinity) < 60) continue;
     if (filtered.filter((other) => Math.abs(other.atMs - ev.atMs) < 65).length >= 2) continue;
-    if (filtered.filter((other) => ev.atMs - other.atMs < 1000).length >= 9) continue;
+    if (filtered.filter((other) => ev.atMs - other.atMs < 1000).length >= (scenes.some(s=>s.motion)?3:9)) continue;
     filtered.push(ev);
     lastCueAt.set(ev.cue, ev.atMs);
     lastLaneAt.set(lane, ev.atMs);

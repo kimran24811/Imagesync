@@ -340,6 +340,12 @@ export async function ensureSfxBank(
     await fs.writeFile(target, wav);
   }
 
+  if(process.env.SFX_LIBRARY_DIR){
+    for(const cue of ALL_ACTIVE_SFX_CUES){
+      const custom=path.resolve(process.env.SFX_LIBRARY_DIR,`${cue}.wav`);
+      try{const stat=await fs.stat(custom);if(stat.isFile()&&stat.size>44)paths[cue]=custom;}catch{}
+    }
+  }
   return paths;
 }
 

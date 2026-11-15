@@ -302,6 +302,7 @@ export async function renderGraphicCardSegmentMp4(params: {
   renderDir: string;
   segPath: string;
   encoderArgs: string[];
+  signal?:AbortSignal;
 }): Promise<void> {
   const width = params.aspectRatio === '9:16' ? 1080 : 1920;
   const height = params.aspectRatio === '9:16' ? 1920 : 1080;
@@ -371,7 +372,7 @@ export async function renderGraphicCardSegmentMp4(params: {
       '-movflags',
       '+faststart',
       params.segPath,
-    ]);
+    ],undefined,{signal:params.signal});
     return;
   }
 
@@ -401,5 +402,5 @@ export async function renderGraphicCardSegmentMp4(params: {
     '-movflags',
     '+faststart',
     params.segPath,
-  ]);
+  ],undefined,{signal:params.signal});
 }

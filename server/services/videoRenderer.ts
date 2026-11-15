@@ -1,3 +1,4 @@
+import { validateMotionScenes } from '../../src/director/validation.ts';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
@@ -16,7 +17,8 @@ import type {
   TextEffectId,
   TransitionStyle,
 } from '../../src/types/studio.ts';
-import { renderGraphicCardSegmentMp4 } from './cardRenderer.ts';
+import { renderMotionLayer } from './motionRenderer.ts';
+import { rasterizeGraphicCardSvg, renderGraphicCardSegmentMp4 } from './cardRenderer.ts';
 import { spawnStreamCommand } from './execUtils.ts';
 import {
   buildSfxSchedule,
@@ -55,6 +57,7 @@ export interface RenderProjectInput {
   scenes: SceneItem[];
   mediaById: Map<string, { path: string; mediaType: MediaType }>;
   onProgress: (state: RenderJobState) => void;
+  signal?: AbortSignal;
 }
 
 function getTargetDimensions(aspectRatio: AspectRatio): { width: number; height: number } {
@@ -97,7 +100,7 @@ function buildPhotoVideoFilter(
   const { baseZoom, cxRatio, cyRatio } = getFocalAnchorParams(focalCrop);
 
   if (motionIntensity === 'none' && (!focalCrop || focalCrop === 'full')) {
-    return `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1,fps=${fps},format=yuv420p`;
+    return `scale=${width}:${height}:force_original_aspect_ratio=increase:in_range=auto:out_range=tv,crop=${width}:${height},setsar=1,fps=${fps},format=yuv420p`;
   }
 
   // 2.2x canvas preserves crisp 1080p edges even when focal sub-cropping 1.48x + snap zooming!
@@ -146,7 +149,7 @@ function buildPhotoVideoFilter(
   }
 
   return [
-    `scale=${upW}:${upH}:force_original_aspect_ratio=increase`,
+    `scale=${upW}:${upH}:force_original_aspect_ratio=increase:in_range=auto:out_range=tv`,
     `crop=${upW}:${upH}`,
     'setsar=1',
     `zoompan=z='${zoomExpr}':x='${xExpr}':y='${yExpr}':d=${frames}:s=${width}x${height}:fps=${fps}`,
@@ -156,7 +159,7 @@ function buildPhotoVideoFilter(
 
 function buildBrollVideoFilter(width: number, height: number): string {
   return [
-    `scale=${width}:${height}:force_original_aspect_ratio=increase`,
+    `scale=${width}:${height}:force_original_aspect_ratio=increase:in_range=auto:out_range=tv`,
     `crop=${width}:${height}`,
     'setsar=1',
     'fps=30',
@@ -180,6 +183,7 @@ function buildEncoderArgs(encoderId: string): string[] {
 }
 
 export async function renderProjectMp4(input: RenderProjectInput): Promise<string> {
+  validateMotionScenes(input.scenes);
   const startedAt = Date.now();
   const { width, height } = getTargetDimensions(input.aspectRatio);
   const fps = 30;
@@ -239,13 +243,14 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
 
   // 1. Render every micro-beat segment (Media, Focal Crop-Cut, or $0 Graphic Card)
   for (let i = 0; i < totalScenes; i++) {
+    if(input.signal?.aborted) throw new Error('Render cancelled.');
     const scene = input.scenes[i];
     const baseFrames = sceneFrameCounts[i];
     const extraFrames = useXfade ? (directorBoundaries[i]?.overlapFrames ?? 0) : 0;
     const totalSegFrames = baseFrames + extraFrames;
 
     const segPath = path.join(renderDir, `seg_${String(i).padStart(4, '0')}.mp4`);
-    const progressPct = Math.round(5 + ((i + 0.2) / totalScenes) * 68);
+    const progressPct = Math.round(5 + ((i + 0.2) / totalScenes) * 49);
 
     emit({
       status: 'rendering',
@@ -258,7 +263,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
           : `${scene.beatKind === 'crop-cut' ? `Sub-crop [${scene.focalCrop}] + ` : ''}${scene.kenBurnsDirection} (${(scene.durationMs / 1000).toFixed(2)}s)`,
     });
 
-    if (scene.beatKind === 'graphic-card') {
+    if (scene.beatKind === 'graphic-card' && !scene.motion) {
       const renderCard = async (enc: string) => {
         await renderGraphicCardSegmentMp4({
           scene,
@@ -268,6 +273,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
           renderDir,
           segPath,
           encoderArgs: buildEncoderArgs(enc),
+          signal:input.signal,
         });
       };
       try {
@@ -285,7 +291,12 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
       continue;
     }
 
-    const media = input.mediaById.get(scene.imageId);
+    let media = input.mediaById.get(scene.imageId);
+    if(scene.beatKind==='graphic-card' && scene.motion) {
+      const base=path.join(renderDir,`card_base_${i}.png`);
+      await rasterizeGraphicCardSvg(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#14151c"/></svg>`,base);
+      media={path:base,mediaType:'image'};
+    }
     if (!media) {
       throw new Error(`Media file missing for Beat ${i + 1}`);
     }
@@ -359,7 +370,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
         '-movflags',
         '+faststart',
         segPath,
-      ]);
+      ],undefined,{signal:input.signal});
     };
 
     try {
@@ -383,6 +394,28 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
 
     await validateVideoSegment(segPath, totalSegFrames, width, height);
     segmentPaths.push(segPath);
+  }
+
+  // Shared layered composition: the same SVG evaluator powers the browser stage.
+  for (let i = 0; i < input.scenes.length; i++) {
+    if(input.signal?.aborted) throw new Error('Render cancelled.');
+    const scene = input.scenes[i];
+    if (!scene.motion) continue;
+    const frames = sceneFrameCounts[i] + (useXfade ? (directorBoundaries[i]?.overlapFrames ?? 0) : 0);
+    const layeredPath = path.join(renderDir, `layered_${i}.mp4`);
+    emit({progress: Math.round(55 + i / totalScenes * 18), currentScene:i+1,
+      stage:`Animating layers ${i+1} of ${totalScenes}`,
+      message:`${scene.motion.layout} · ${scene.motion.entrance} · ${scene.motion.quiet ? 'quiet beat' : 'timed text and graphic overlays'}`});
+    const render = (encoder:string) => renderMotionLayer({scene,aspect:input.aspectRatio,frames,
+      inputPath:segmentPaths[i],outputPath:layeredPath,encoderArgs:buildEncoderArgs(encoder),
+      captions:effectiveCaptionMode !== 'off',brand:input.brandKicker,signal:input.signal});
+    try { await render(activeEncoder); } catch(error) {
+      if(activeEncoder==='libx264') throw error;
+      activeEncoder='libx264';await render(activeEncoder);
+    }
+    await validateVideoSegment(layeredPath,frames,width,height);
+    // Release raw segments only after every transition using them is composed.
+    segmentPaths[i]=layeredPath;
   }
 
   // Compose each incoming transition with only TWO decoded video inputs.
@@ -412,7 +445,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
     args.push('-filter_complex', graph, '-map', '[v]', '-frames:v', String(frames), '-r', String(fps), '-an');
     const encode = (encoder: string) => spawnStreamCommand('ffmpeg', [
       ...args, ...buildEncoderArgs(encoder), '-video_track_timescale', '15360', composed,
-    ]);
+    ],undefined,{signal:input.signal});
     emit({ status: 'muxing', progress: Math.round(73 + (i / totalScenes) * 12),
       currentScene: i + 1, stage: `Compositing beat ${i + 1} of ${totalScenes}`,
       message: boundary ? `Preserving ${boundary.kind} transition at ${input.scenes[i].startMs}ms` : 'Joining exact shot frames' });
@@ -433,9 +466,9 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
 
   // 2. Generate mixed-scale kinetic ASS overlay
   let assPath: string | null = null;
-  if (effectiveCaptionMode !== 'off') {
+  if (effectiveCaptionMode !== 'off' && input.scenes.some(scene=>!scene.motion)) {
     assPath = path.join(renderDir, 'subtitles.ass');
-    await writeAssSubtitleFile(assPath, input.scenes, input.aspectRatio, {
+    await writeAssSubtitleFile(assPath, input.scenes.filter(scene => !scene.motion), input.aspectRatio, {
       captionMode: effectiveCaptionMode,
       textEffect: input.textEffect,
       fontStyle: input.fontStyle,
@@ -607,7 +640,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
     // A codec/graph/render error must never be disguised as a version error.
     const runWithCompatibleFilterSyntax = async (args: string[]): Promise<void> => {
       try {
-        await spawnStreamCommand('ffmpeg', args, undefined, { cwd: renderDir });
+        await spawnStreamCommand('ffmpeg', args, undefined, { cwd: renderDir, signal:input.signal });
       } catch (err) {
         const selected = args.find((arg) =>
           arg === '-filter_complex_script' || arg === '-/filter_complex'
@@ -616,7 +649,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
         const retryArgs = args.slice();
         const optionIndex = retryArgs.indexOf(selected);
         retryArgs[optionIndex] = alternateFilterFileOption(selected);
-        await spawnStreamCommand('ffmpeg', retryArgs, undefined, { cwd: renderDir });
+        await spawnStreamCommand('ffmpeg', retryArgs, undefined, { cwd: renderDir, signal:input.signal });
       }
     };
 
@@ -641,6 +674,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
   emit({ status: 'muxing', progress: 96, stage: 'Validating encoded output',
     message: 'Checking every video frame, audio coverage and full MP4 decode before publishing...' });
   await validateRenderedMp4(outputPath, actualAudioMs, totalFrames, width, height);
+  if(input.signal?.aborted)throw new Error('Render cancelled.');
   await fs.rename(outputPath, finalPath);
   const stat = await fs.stat(finalPath);
 

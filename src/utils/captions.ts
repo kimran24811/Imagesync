@@ -134,6 +134,25 @@ export function buildDynamicCaptionFrames(
           ? 4
           : 6;
 
+  if(scene.words?.length){
+    const frames:DynamicCaptionFrame[]=[];
+    const token=(raw:string,active:boolean):CaptionWordToken=>({raw,display:raw.replace(/\*/g,''),isAccent:accentSet.has(normalizeUnicodeToken(raw))||/\*[^*]+\*/.test(raw),isNumeric:/\d/.test(raw),isActiveWord:active});
+    for(let start=0;start<scene.words.length;start+=maxWordsPerPhrase){
+      const chunk=scene.words.slice(start,start+maxWordsPerPhrase);
+      if(textEffect==='type-reveal'||textEffect==='kinetic-karaoke'){
+        chunk.forEach((word,i)=>{
+          const startMs=Math.max(scene.startMs,word.startMs),endMs=Math.min(scene.endMs,word.endMs);
+          if(endMs<=startMs)return;
+          const visible=textEffect==='type-reveal'?chunk.slice(0,i+1):chunk;
+          frames.push({id:`${scene.id}_speech_${start+i}`,startMs,endMs,isRtl,words:visible.map((w,index)=>token(w.text,index===i))});
+        });
+      }else{
+        const startMs=Math.max(scene.startMs,chunk[0].startMs),endMs=Math.min(scene.endMs,chunk.at(-1)!.endMs);
+        if(endMs>startMs)frames.push({id:`${scene.id}_speech_${start}`,startMs,endMs,isRtl,words:chunk.map(w=>token(w.text,false))});
+      }
+    }
+    return frames;
+  }
   const phraseChunks = splitIntoPhraseChunks(scene, maxWordsPerPhrase);
   const frames: DynamicCaptionFrame[] = [];
 
