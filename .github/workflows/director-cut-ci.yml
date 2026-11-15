@@ -25,3 +25,18 @@ jobs:
         run: npm test
       - name: Production build
         run: npm run build
+
+  windows-svg-card-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Windows-native SVG-to-PNG renderer
+        run: npm install --no-audit --no-fund
+      - name: Verify PNG rendering and FFmpeg input on Windows
+        run: npx tsx --test tests/graphicCardRender.test.ts
