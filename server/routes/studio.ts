@@ -1,3 +1,12 @@
+import { createDirectorDemo } from '../services/directorDemo.ts';
+import { planMotion, estimateWords, emphasisFrom } from '../../src/director/planner.ts';
+import { fileURLToPath } from 'node:url';
+import { RenderQueue } from '../services/renderQueue.ts';
+import { spawn } from 'node:child_process';
+import { directSession } from '../services/directorEngine.ts';
+import { getSpeechStatus } from '../services/speechAligner.ts';
+import { saveProject, loadProject, listProjects, type ProjectRecord } from '../services/projectStore.ts';
+import { DIRECTOR_PRESETS } from '../../src/director/types.ts';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -62,14 +71,7 @@ import {
 } from '../services/sfxEngine.ts';
 import { renderProjectMp4 } from '../services/videoRenderer.ts';
 
-interface StoredProject {
-  session: ProjectSession;
-  projectDir: string;
-  audioPath: string;
-  musicPath?: string;
-  mediaById: Map<string, { path: string; mediaType: MediaType }>;
-  thumbPathsById: Map<string, string>;
-}
+type StoredProject = ProjectRecord;
 
 interface StoredJob {
   state: RenderJobState;
@@ -83,6 +85,9 @@ interface StagedFileRecord {
   role: 'audio' | 'music' | 'media';
   filePath: string;
   orderIndex: number;
+  totalChunks:number;
+  chunkHashes:string[];
+  bytes:number;
 }
 
 interface StagedUploadSession {
@@ -109,7 +114,17 @@ const BLUEPRINT_TTS_DIR = path.join(WORKSPACE_ROOT, '_blueprint_tts');
 const JOBS_META_DIR = path.join(WORKSPACE_ROOT, '_jobs');
 
 const projects = new Map<string, StoredProject>();
+async function storeProject(record:StoredProject):Promise<void> {
+  if(record.session.backgroundMusic?.filename==='SceneSync original underscore')record.musicPath=path.join(record.projectDir,'music',path.basename(record.session.backgroundMusic.url));
+  await saveProject(record);projects.set(record.session.id,record);
+}
+async function getProject(id:string):Promise<StoredProject|undefined> {
+  const existing=projects.get(id);if(existing)return existing;
+  const record=await loadProject(WORKSPACE_ROOT,id);if(record)projects.set(id,record);return record;
+}
 const jobs = new Map<string, StoredJob>();
+const renderQueue=new RenderQueue();
+const renderControllers=new Map<string,AbortController>();
 const stagedUploads = new Map<string, StagedUploadSession>();
 const analyzeJobs = new Map<string, AnalyzeJobState>();
 
@@ -155,7 +170,7 @@ async function resolveJobRecord(jobId: string): Promise<StoredJob | undefined> {
       } catch {
         failure = 'Completed export file is missing. Export the project again.';
       }
-    } else if (parsed.state.status !== 'failed') {
+    } else if (parsed.state.status !== 'failed' && parsed.state.status !== 'cancelled') {
       failure = 'Render interrupted by an application restart. Export the project again.';
     }
     if (failure) {
@@ -179,9 +194,11 @@ const upload = multer({
   dest: UPLOAD_TMP_DIR,
   limits: {
     fileSize: 350 * 1024 * 1024,
-    files: 130,
+    files: 152,
   },
 });
+
+const chunkUpload=multer({dest:UPLOAD_TMP_DIR,limits:{fileSize:8*1024*1024,files:1}});
 
 function sanitizeAspectRatio(val: unknown): AspectRatio {
   return val === '16:9' ? '16:9' : '9:16';
@@ -330,6 +347,37 @@ function getSafeExtension(filename: string, fallback: string): string {
 export function createStudioRouter(): express.Router {
   const router = express.Router();
 
+  router.get('/director/presets', (_req,res)=>res.json({presets:DIRECTOR_PRESETS}));
+  router.get('/projects', async (_req,res)=>res.json({projects:await listProjects(WORKSPACE_ROOT)}));
+  router.get('/projects/:id', async (req,res)=>{
+    const stored=await getProject(req.params.id);
+    if(!stored){res.status(404).json({error:'Saved project not found.'});return;}
+    res.json(stored.session);
+  });
+  router.post('/projects/:id/direct', async (req,res)=>{
+    try {
+      const stored=await getProject(req.params.id);
+      if(!stored){res.status(404).json({error:'Saved project not found.'});return;}
+      stored.session=await directSession(stored.session,stored.audioPath,req.body?.settings??stored.session.directorSettings);
+      if(stored.session.backgroundMusic?.filename==='SceneSync original underscore')stored.musicPath=path.join(stored.projectDir,'music',path.basename(stored.session.backgroundMusic.url));
+      await saveProject(stored);res.json(stored.session);
+    }catch(error){res.status(400).json({error:error instanceof Error?error.message:'Direction failed.'});}
+  });
+  // Setup is user-triggered. Install packages/model inside workspace_data only.
+  let speechSetup:{status:string;message:string}={status:'idle',message:''};
+  router.get('/speech/setup',(_req,res)=>res.json(speechSetup));
+  router.post('/speech/setup',(_req,res)=>{
+    if(speechSetup.status==='running'){res.json(speechSetup);return;}
+    speechSetup={status:'running',message:'Installing local speech alignment and downloading the model…'};
+    const child=spawn(process.execPath,[fileURLToPath(new URL('../../scripts/setup-speech.mjs',import.meta.url))],{windowsHide:true,stdio:['ignore','pipe','pipe']});
+    let log='';
+    const update=(chunk:Buffer)=>{log=(log+chunk.toString()).slice(-2500);speechSetup.message=log.split(/\r?\n/).filter(Boolean).at(-1)??speechSetup.message;};
+    child.stdout.on('data',update);child.stderr.on('data',update);
+    child.on('error',error=>{speechSetup={status:'failed',message:error.message};});
+    child.on('close',code=>{speechSetup={status:code===0?'completed':'failed',message:code===0?'Local speech alignment is ready.':log||'Install Python 3.10–3.12 and retry speech setup.'};});
+    res.json(speechSetup);
+  });
+
   // 0. Serve procedural SFX WAV files for live preview parity
   router.get('/sfx/:cue', async (req, res) => {
     const cue = req.params.cue as ActiveSfxCue;
@@ -422,8 +470,9 @@ export function createStudioRouter(): express.Router {
   // 1. Probe system capabilities
   router.get('/capabilities', async (_req, res) => {
     try {
-      const [encoderInfo, ollama] = await Promise.all([probeEncoders(), getOllamaVisionStatus()]);
+      const [encoderInfo, ollama, speech] = await Promise.all([probeEncoders(), getOllamaVisionStatus(), getSpeechStatus()]);
       res.json({
+        speech,
         ffmpegVersion: encoderInfo.ffmpegVersion,
         geminiConfigured: isGeminiConfigured(),
         ollamaVisionAvailable: ollama.available,
@@ -492,7 +541,7 @@ export function createStudioRouter(): express.Router {
   });
 
   // 1c. Receive individual file chunk (<= 8MB per request)
-  router.post('/uploads/:uploadId/chunk', upload.single('chunk'), async (req, res) => {
+  router.post('/uploads/:uploadId/chunk', chunkUpload.single('chunk'), async (req, res) => {
     const staged = stagedUploads.get(req.params.uploadId);
     const chunkFile = req.file;
     try {
@@ -511,28 +560,26 @@ export function createStudioRouter(): express.Router {
         roleRaw === 'audio' || roleRaw === 'music' ? roleRaw : 'media';
       const fileKey = String(req.body?.fileKey ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || crypto.randomBytes(4).toString('hex');
       const originalName = String(req.body?.filename ?? 'upload.bin');
-      const chunkIndex = Math.max(0, Number(req.body?.chunkIndex ?? 0));
-      const orderIndex = Math.max(0, Number(req.body?.orderIndex ?? 0));
-
-      const ext = getSafeExtension(originalName, role === 'audio' || role === 'music' ? '.mp3' : '.jpg');
-      const destPath = path.join(staged.stagingDir, `${role}_${fileKey}${ext}`);
-
-      const chunkBuf = await fs.readFile(chunkFile.path);
-      await fs.rm(chunkFile.path, { force: true }).catch(() => {});
-
-      if (chunkIndex === 0) {
-        await fs.writeFile(destPath, chunkBuf);
-      } else {
-        await fs.appendFile(destPath, chunkBuf);
+      const chunkIndex = Number(req.body?.chunkIndex ?? 0);
+      const totalChunks = Number(req.body?.totalChunks ?? 1);
+      const orderIndex = Number(req.body?.orderIndex ?? 0);
+      if(!Number.isInteger(chunkIndex)||!Number.isInteger(totalChunks)||chunkIndex<0||totalChunks<1||totalChunks>4096||chunkIndex>=totalChunks||!Number.isInteger(orderIndex)||orderIndex<0)throw new Error('Invalid upload chunk sequence.');
+      const ext=getSafeExtension(originalName,role==='audio'||role==='music'?'.mp3':'.jpg');
+      const destPath=path.join(staged.stagingDir,`${role}_${fileKey}${ext}`);
+      const chunkBuf=await fs.readFile(chunkFile.path);
+      await fs.rm(chunkFile.path,{force:true});
+      const hash=crypto.createHash('sha256').update(chunkBuf).digest('hex');
+      const prior=staged.filesByKey.get(fileKey);
+      if(prior&&(prior.originalName!==originalName||prior.role!==role||prior.totalChunks!==totalChunks))throw new Error('Upload file identity changed during transfer. Restart this upload.');
+      if(prior && chunkIndex<prior.chunkHashes.length){
+        if(prior.chunkHashes[chunkIndex]!==hash)throw new Error('Retried chunk contains different bytes. Restart this upload.');
+        res.json({ok:true,fileKey,chunkIndex,repeated:true});return;
       }
-
-      staged.filesByKey.set(fileKey, {
-        fileKey,
-        originalName,
-        role,
-        filePath: destPath,
-        orderIndex,
-      });
+      if(chunkIndex!==(prior?.chunkHashes.length??0))throw new Error('Upload chunk arrived out of order. Retry the missing chunk.');
+      if((prior?.bytes??0)+chunkBuf.length>350*1024*1024)throw new Error('Uploaded file exceeds 350 MB.');
+      if(!prior&&staged.filesByKey.size>=152)throw new Error('Maximum upload is 150 visuals plus voiceover and music.');
+      if(!prior)await fs.writeFile(destPath,chunkBuf);else await fs.appendFile(destPath,chunkBuf);
+      staged.filesByKey.set(fileKey,{fileKey,originalName,role,filePath:destPath,orderIndex,totalChunks,chunkHashes:[...(prior?.chunkHashes??[]),hash],bytes:(prior?.bytes??0)+chunkBuf.length});
 
       res.json({ ok: true, fileKey, chunkIndex });
     } catch (err: unknown) {
@@ -550,6 +597,9 @@ export function createStudioRouter(): express.Router {
       return;
     }
 
+    if([...staged.filesByKey.values()].some(file=>file.chunkHashes.length!==file.totalChunks)){
+      res.status(400).json({error:'Some upload chunks are missing. Complete all files before generating the reel.'});return;
+    }
     const allFiles = Array.from(staged.filesByKey.values()).sort(
       (a, b) => a.orderIndex - b.orderIndex
     );
@@ -643,6 +693,7 @@ export function createStudioRouter(): express.Router {
           await fs.rename(musicRec.filePath, savedMusicPath);
           const musicDurationMs = await probeAudioDurationMs(savedMusicPath);
           backgroundMusic = {
+            source:'uploaded',
             filename: musicRec.originalName,
             url: `/api/media/${projectId}/music/${savedMusicName}`,
             durationMs: musicDurationMs,
@@ -752,7 +803,7 @@ export function createStudioRouter(): express.Router {
           };
         });
 
-        const session: ProjectSession = {
+        let session: ProjectSession = {
           id: projectId,
           createdAt: new Date().toISOString(),
           aspectRatio,
@@ -785,7 +836,10 @@ export function createStudioRouter(): express.Router {
           scenes: mergedScenes,
         };
 
-        projects.set(projectId, {
+        session = await directSession(session, savedAudioPath, typeof req.body?.directorSettings === 'string' ? JSON.parse(req.body.directorSettings) : req.body?.directorSettings ?? {enabled:false}, message => {
+          if (typeof jobState !== 'undefined') {jobState.message=message;jobState.progress=92;}
+        });
+        await storeProject({
           session,
           projectDir,
           audioPath: savedAudioPath,
@@ -821,7 +875,7 @@ export function createStudioRouter(): express.Router {
   // 2. Serve stored media securely (audio, music, images/video clips, thumbnails)
   router.get('/media/:projectId/:kind/:filename', async (req, res) => {
     const { projectId, kind, filename } = req.params;
-    const stored = projects.get(projectId);
+    const stored = await getProject(projectId);
     if (!stored) {
       res.status(404).json({ error: 'Project session not found.' });
       return;
@@ -846,7 +900,7 @@ export function createStudioRouter(): express.Router {
     upload.fields([
       { name: 'audio', maxCount: 1 },
       { name: 'music', maxCount: 1 },
-      { name: 'images', maxCount: 120 },
+      { name: 'images', maxCount: 150 },
     ]),
     async (req, res) => {
       const files = req.files as Record<string, Express.Multer.File[]> | undefined;
@@ -929,6 +983,7 @@ export function createStudioRouter(): express.Router {
           await fs.rename(musicFile.path, savedMusicPath);
           const musicDurationMs = await probeAudioDurationMs(savedMusicPath);
           backgroundMusic = {
+            source:'uploaded',
             filename: musicFile.originalname,
             url: `/api/media/${projectId}/music/${savedMusicName}`,
             durationMs: musicDurationMs,
@@ -1023,7 +1078,7 @@ export function createStudioRouter(): express.Router {
           };
         });
 
-        const session: ProjectSession = {
+        let session: ProjectSession = {
           id: projectId,
           createdAt: new Date().toISOString(),
           aspectRatio,
@@ -1056,7 +1111,8 @@ export function createStudioRouter(): express.Router {
           scenes: mergedScenes,
         };
 
-        projects.set(projectId, {
+        session = await directSession(session, savedAudioPath, typeof req.body?.directorSettings === 'string' ? JSON.parse(req.body.directorSettings) : req.body?.directorSettings ?? {enabled:false});
+        await storeProject({
           session,
           projectDir,
           audioPath: savedAudioPath,
@@ -1083,6 +1139,7 @@ export function createStudioRouter(): express.Router {
   // 4. One-click Sample Story generator
   router.post('/sample', async (req, res) => {
     try {
+      if(req.body?.directorSettings?.enabled){const demo=await createDirectorDemo(WORKSPACE_ROOT,req.body.directorSettings,sanitizeAspectRatio(req.body?.aspectRatio));await storeProject(demo);res.json(demo.session);return;}
       const aspectRatio = sanitizeAspectRatio(req.body?.aspectRatio);
       const pacingMode = sanitizePacingMode(req.body?.pacingMode);
       const graphicCardTheme = sanitizeGraphicCardTheme(req.body?.graphicCardTheme);
@@ -1192,7 +1249,7 @@ export function createStudioRouter(): express.Router {
         alignment.imageSummaries
       );
 
-      const session: ProjectSession = {
+      let session: ProjectSession = {
         id: projectId,
         createdAt: new Date().toISOString(),
         aspectRatio,
@@ -1224,7 +1281,8 @@ export function createStudioRouter(): express.Router {
         scenes: alignment.scenes,
       };
 
-      projects.set(projectId, {
+      session = await directSession(session, sampleAudioPath, {...(req.body?.directorSettings ?? {enabled:false}),alignment:'estimated'});
+      await storeProject({
         session,
         projectDir,
         audioPath: sampleAudioPath,
@@ -1240,8 +1298,8 @@ export function createStudioRouter(): express.Router {
   });
 
   // 5. Persist scene swaps, split/merge/reorder, transitions, subtitles, music config, or recalculate timings
-  router.post('/projects/:id/realign', (req, res) => {
-    const stored = projects.get(req.params.id);
+  router.post('/projects/:id/realign', async (req, res) => {
+    const stored = await getProject(req.params.id);
     if (!stored) {
       res.status(404).json({ error: 'Project session not found.' });
       return;
@@ -1305,6 +1363,7 @@ export function createStudioRouter(): express.Router {
       };
     }
 
+    const beforeScenes=stored.session.scenes;
     if (Array.isArray(scenes) && scenes.length > 0) {
       if (recalculateTimings) {
         stored.session.scenes = computeDynamicSceneTimings(
@@ -1332,12 +1391,30 @@ export function createStudioRouter(): express.Router {
       }
     }
 
-    res.json(stored.session);
+    if(stored.session.directorSettings?.enabled){
+      if(recalculateTimings){
+        const plan=planMotion(stored.session.scenes,stored.session.directorSettings.preset,{engine:'estimated',coverage:0,words:estimateWords(stored.session.scenes),notice:'Manual timeline recalculation replaced speech anchors; regenerate direction to align again.'});
+        stored.session.scenes=plan.scenes;stored.session.directorReport=plan.report;
+      }else{
+        let wordsChanged=false;
+        stored.session.scenes=stored.session.scenes.map(scene=>{
+          const prior=beforeScenes.find(s=>s.id===scene.id);
+          if(!scene.motion||!prior)return scene;
+          const changed=prior.text!==scene.text||prior.startMs!==scene.startMs||prior.endMs!==scene.endMs;
+          const cardChanged=JSON.stringify(prior.graphicCard)!==JSON.stringify(scene.graphicCard);
+          if(changed)wordsChanged=true;
+          return changed||cardChanged?{...scene,words:changed?undefined:scene.words,motion:{...scene.motion,headline:scene.graphicCard?.headline||scene.text,accent:scene.graphicCard?.statValue||emphasisFrom(scene.text)}}:scene;
+        });
+        if(wordsChanged&&stored.session.directorReport)stored.session.directorReport={...stored.session.directorReport,alignment:{engine:'estimated',coverage:0},notices:['The storyboard text/timing changed. Regenerate direction to recognize speech again.']};
+      }
+    }
+    try {await saveProject(stored);res.json(stored.session);}
+    catch(error){res.status(500).json({error:`Could not save project: ${error instanceof Error?error.message:String(error)}`});}
   });
 
   // 6. Upload or replace background music bed on an existing project
   router.post('/projects/:id/music', upload.single('music'), async (req, res) => {
-    const stored = projects.get(req.params.id);
+    const stored = await getProject(req.params.id);
     if (!stored) {
       if (req.file) await fs.rm(req.file.path, { force: true }).catch(() => {});
       res.status(404).json({ error: 'Project session not found.' });
@@ -1363,6 +1440,7 @@ export function createStudioRouter(): express.Router {
 
       stored.musicPath = savedPath;
       stored.session.backgroundMusic = {
+        source:'uploaded',
         filename: req.file.originalname,
         url: `/api/media/${stored.session.id}/music/${savedName}`,
         durationMs,
@@ -1370,7 +1448,8 @@ export function createStudioRouter(): express.Router {
         duckingEnabled,
       };
 
-      res.json(stored.session);
+      await saveProject(stored);
+    res.json(stored.session);
     } catch (err: unknown) {
       await fs.rm(req.file.path, { force: true }).catch(() => {});
       const message = err instanceof Error ? err.message : 'Failed to process background music.';
@@ -1380,7 +1459,7 @@ export function createStudioRouter(): express.Router {
 
   // 7. Start 1080p MP4 export job
   router.post('/projects/:id/export', async (req, res) => {
-    const stored = projects.get(req.params.id);
+    const stored = await getProject(req.params.id);
     if (!stored) {
       res.status(404).json({ error: 'Project session not found.' });
       return;
@@ -1424,7 +1503,7 @@ export function createStudioRouter(): express.Router {
     stored.session.accentColor = accentColor;
     stored.session.brandKicker = brandKicker;
     stored.session.sfxConfig = sfxConfig;
-    stored.session.scenes = scenes;
+    if(scenes.every(scene=>scene.beatKind==='graphic-card'||stored.mediaById.has(scene.imageId)))stored.session.scenes = scenes;
 
     const encoderInfo = await probeEncoders();
     const validIds = new Set(encoderInfo.availableEncoders.map((e) => e.id));
@@ -1455,26 +1534,35 @@ export function createStudioRouter(): express.Router {
     jobs.set(jobId, jobRecord);
 
     try {
+      await saveProject(stored);
       await persistJobMetadata(jobRecord);
     } catch (error) {
       jobs.delete(jobId);
       res.status(500).json({ error: `Cannot save render job: ${error instanceof Error ? error.message : String(error)}` });
       return;
     }
+    const controller=new AbortController();renderControllers.set(jobId,controller);
+    const snapshot={audioPath:stored.audioPath,audioDurationMs:stored.session.audio.durationMs,musicPath:stored.musicPath,backgroundMusic:structuredClone(stored.session.backgroundMusic),transitionDurationMs:stored.session.transitionDurationMs,scenes:structuredClone(scenes),mediaById:new Map(stored.mediaById)};
     let completedState: RenderJobState | undefined;
-    void renderProjectMp4({
+    void renderQueue.enqueue(async()=>{
+      try {
+        const disk=await fs.statfs(stored.projectDir);
+        const needed=256*1024*1024+snapshot.audioDurationMs*8000;
+        if(disk.bavail*disk.bsize<needed)throw new Error(`Not enough free disk space. Free approximately ${Math.ceil(needed/1024/1024)} MB before rendering this reel.`);
+      }catch(error){if(error instanceof Error&&error.message.startsWith('Not enough'))throw error;}
+      return renderProjectMp4({
       jobId,
       projectId: stored.session.id,
       projectDir: stored.projectDir,
       sfxDir: SFX_BANK_DIR,
-      audioPath: stored.audioPath,
-      audioDurationMs: stored.session.audio.durationMs,
-      musicPath: stored.musicPath,
-      backgroundMusic: stored.session.backgroundMusic,
+      audioPath: snapshot.audioPath,
+      audioDurationMs: snapshot.audioDurationMs,
+      musicPath: snapshot.musicPath,
+      backgroundMusic: snapshot.backgroundMusic,
       aspectRatio,
       motionIntensity,
       transitionStyle,
-      transitionDurationMs: stored.session.transitionDurationMs,
+      transitionDurationMs: snapshot.transitionDurationMs,
       subtitlesEnabled,
       captionMode,
       textEffect,
@@ -1483,8 +1571,9 @@ export function createStudioRouter(): express.Router {
       brandKicker,
       sfxConfig,
       encoderId: chosenEncoder,
-      scenes,
-      mediaById: stored.mediaById,
+      signal:controller.signal,
+      scenes: snapshot.scenes,
+      mediaById: snapshot.mediaById,
       onProgress: (nextState) => {
         if (nextState.status === 'completed') {
           completedState = nextState;
@@ -1493,8 +1582,10 @@ export function createStudioRouter(): express.Router {
         jobRecord.state = nextState;
         emitter.emit('progress', nextState);
       },
-    })
+      });
+    },controller.signal)
       .then(async (outputPath) => {
+        if(controller.signal.aborted){await fs.rm(outputPath,{force:true});throw new Error('Render cancelled.');}
         if (!completedState) throw new Error('Render did not report a validated output.');
         // Persist first, then expose completion with an immediately usable download.
         await persistJobMetadata({ ...jobRecord, state: completedState, outputPath });
@@ -1506,16 +1597,25 @@ export function createStudioRouter(): express.Router {
         const msg = err instanceof Error ? err.message : 'FFmpeg render failed.';
         jobRecord.state = {
           ...jobRecord.state,
-          status: 'failed',
-          stage: 'Render failed',
+          status: controller.signal.aborted?'cancelled':'failed',
+          stage: controller.signal.aborted?'Render cancelled':'Render failed',
           message: msg,
           error: msg,
         };
         void persistJobMetadata(jobRecord).catch(error => console.error('Could not persist failed render job:', error));
         emitter.emit('progress', jobRecord.state);
-      });
+      }).finally(()=>renderControllers.delete(jobId));
 
     res.json({ jobId, state: initialState });
+  });
+
+  router.post('/jobs/:jobId/cancel',async(req,res)=>{
+    const job=await resolveJobRecord(req.params.jobId),controller=renderControllers.get(req.params.jobId);
+    if(!job||!controller){res.status(404).json({error:'Active render job not found.'});return;}
+    if(['completed','failed','cancelled'].includes(job.state.status)){res.status(409).json({error:'This render has already finished.'});return;}
+    controller.abort();
+    job.state={...job.state,status:'cancelled',stage:'Render cancelled',message:'Cancelled by user. Temporary render files are being cleaned.',outputUrl:undefined,fileSizeBytes:undefined};
+    await persistJobMetadata(job);job.emitter.emit('progress',job.state);res.json(job.state);
   });
 
   // 7b. Recover most recent completed MP4 export from disk (survives page reload/restart & finds pre-existing renders)
@@ -1567,14 +1667,14 @@ export function createStudioRouter(): express.Router {
 
     const sendEvent = (state: RenderJobState) => {
       res.write(`data: ${JSON.stringify(state)}\n\n`);
-      if (state.status === 'completed' || state.status === 'failed') {
+      if (state.status === 'completed' || state.status === 'failed' || state.status === 'cancelled') {
         res.end();
       }
     };
 
     sendEvent(job.state);
 
-    if (job.state.status !== 'completed' && job.state.status !== 'failed') {
+    if (job.state.status !== 'completed' && job.state.status !== 'failed' && job.state.status !== 'cancelled') {
       const listener = (state: RenderJobState) => sendEvent(state);
       job.emitter.on('progress', listener);
       req.on('close', () => {

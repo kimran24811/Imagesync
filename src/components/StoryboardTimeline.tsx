@@ -1,3 +1,4 @@
+import { MOTION_TRANSITIONS, ENTRANCES, LAYOUTS } from '../director/types';
 import React, { useState } from 'react';
 import {
   ArrowDown,
@@ -538,6 +539,11 @@ export const StoryboardTimeline: React.FC<StoryboardTimelineProps> = ({
                   </div>
                 )}
 
+                {scene.motion&&<details className="mt-3 rounded-lg border border-[#e9d2df] bg-[#fff5fa] p-3 text-xs text-[#4b3344]"><summary className="cursor-pointer font-semibold">Director plan · {scene.motion.layout} · {scene.motion.entrance} · {scene.motion.transition}</summary><p className="mt-2">{scene.motion.reason}</p><div className="mt-2 flex flex-wrap gap-3">
+                  <label>Layout <select className="rounded border p-1" value={scene.motion.layout} onChange={e=>onUpdateScene(scene.id,{motion:{...scene.motion!,layout:e.target.value as typeof scene.motion.layout}},false)}>{LAYOUTS.map(x=><option key={x}>{x}</option>)}</select></label>
+                  <label>Text entrance <select className="rounded border p-1" value={scene.motion.entrance} onChange={e=>onUpdateScene(scene.id,{motion:{...scene.motion!,entrance:e.target.value as typeof scene.motion.entrance}},false)}>{ENTRANCES.map(x=><option key={x}>{x}</option>)}</select></label>
+                  <label>Incoming transition <select className="rounded border p-1" value={scene.motion.transition} onChange={e=>onUpdateScene(scene.id,{motion:{...scene.motion!,transition:e.target.value as typeof scene.motion.transition}},false)}>{MOTION_TRANSITIONS.map(x=><option key={x}>{x}</option>)}</select></label>
+                </div><p className="mt-2">{scene.words?.filter(w=>w.source==='speech').length??0} speech-anchored words · {scene.motion.cues.length} sound cues · optional overrides</p></details>}
                 {/* Beat Visual Mode, Motion, Crop Region, Caption Zone, Kicker, Accent & SFX Controls */}
                 <div className="mt-3 flex flex-wrap items-center gap-3">
                   <label className="inline-flex items-center gap-1.5 text-xs text-[#475569]">

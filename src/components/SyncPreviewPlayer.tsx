@@ -1,3 +1,4 @@
+import { buildMotionSvg } from '../director/composition';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft,
@@ -426,6 +427,8 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
       ? Math.min(1, Math.max(0, currentTimeMs / session.audio.durationMs))
       : 0;
 
+  const hasDirector = Boolean(activeScene?.motion);
+  const overlaySvg = useMemo(()=>activeScene?.motion?buildMotionSvg(activeScene,currentTimeMs,session.aspectRatio,{captions:session.subtitlesEnabled && session.captionMode!=='off',brand:session.brandKicker}):'',[activeScene,currentTimeMs,session.aspectRatio,session.subtitlesEnabled,session.captionMode,session.brandKicker]);
   const isGraphicCard = activeScene?.beatKind === 'graphic-card';
 
   const kbClass =
@@ -453,7 +456,7 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
   const fontStyle: FontStyleId = session.fontStyle || 'modern-sans';
 
   const activeFrame = useMemo(() => {
-    if (!activeScene || effectiveCaptionMode === 'off' || isGraphicCard) return null;
+    if (!activeScene || effectiveCaptionMode === 'off' || isGraphicCard || hasDirector) return null;
     return getActiveDynamicFrame(
       activeScene,
       currentTimeMs,
@@ -461,7 +464,7 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
       textEffect,
       session.aspectRatio
     );
-  }, [activeScene, effectiveCaptionMode, isGraphicCard, currentTimeMs, textEffect, session.aspectRatio]);
+  }, [activeScene, effectiveCaptionMode, isGraphicCard, hasDirector, currentTimeMs, textEffect, session.aspectRatio]);
 
   const getBodyFontClass = (rtl: boolean) => {
     if (rtl) return 'font-arabic-sans';
@@ -756,6 +759,7 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
         />
       )}
 
+      {session.directorReport && <div className="mb-4 rounded-xl border border-[#e9d2df] bg-[#fff5fa] p-4 text-xs text-[#4b3344]"><strong>{session.directorReport.preset.replace(/-/g,' ')} · {session.directorReport.effectCount} directed accents</strong><p className="mt-1">{session.directorReport.alignment.engine==='faster-whisper'?`${Math.round(session.directorReport.alignment.coverage*100)}% of script words matched to speech`:'Estimated speech timing'} · {session.directorReport.engine==='gemini-assisted'?'AI-assisted direction':'Automatic design rules'}</p>{session.directorReport.notices.map((notice,i)=><p key={i} className="mt-1">{notice}</p>)}</div>}
       {/* Top Toolbar */}
       <div className="mb-4 flex flex-wrap items-center justify-between gap-4 border-b border-[#E2E8F0] pb-4">
         <div>
@@ -765,7 +769,7 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
           <p className="mt-0.5 text-xs text-[#475569]">
             <span>
               {voiceLockedCount > 0
-                ? 'Gemini Acoustic + Vision Locked'
+                ? 'Speech-timed visual plan'
                 : session.matchingEngineUsed === 'gemini' || session.matchingEngineUsed === 'gemini-vision'
                   ? 'Gemini Vision Matched'
                   : 'Rapid Concept-Paced'}
@@ -944,7 +948,7 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
               : 'aspect-video w-full max-w-[780px]'
           }`}
         >
-          {isGraphicCard && activeScene ? (
+          {isGraphicCard && activeScene && !hasDirector ? (
             renderGraphicCardPlate(activeScene)
           ) : activeMedia && imgErrorId !== activeMedia.id ? (
             activeMedia.mediaType === 'video' ? (
@@ -996,6 +1000,8 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
               </span>
             </div>
           )}
+
+          {hasDirector && <div className="director-overlay" data-testid="director-overlay" dangerouslySetInnerHTML={{__html:overlaySvg}}/>}
 
           {/* Brief Whip-Flash Cut Burst on Dynamic Transitions */}
           {incomingBoundary?.kind === 'flash' && sceneElapsedMs < incomingBoundary.overlapFrames * 1000 / 30 && (

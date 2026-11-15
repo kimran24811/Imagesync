@@ -181,3 +181,8 @@
     transform: none !important;
   }
 }
+
+@font-face { font-family: 'SceneSync Sans'; src: url('/fonts/SceneSyncSans-Regular.ttf') format('truetype'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'SceneSync Sans'; src: url('/fonts/SceneSyncSans-Bold.ttf') format('truetype'); font-weight: 600 900; font-display: swap; }
+.director-overlay { position: absolute; inset: 0; pointer-events: none; }
+.director-overlay svg { width: 100%; height: 100%; display: block; }

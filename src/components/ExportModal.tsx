@@ -38,7 +38,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   if (!isOpen || !jobState) return null;
 
   const isCompleted = jobState.status === 'completed';
-  const isFailed = jobState.status === 'failed';
+  const isFailed = jobState.status === 'failed'||jobState.status==='cancelled';
   const filename = `scenesync_${jobState.projectId}_1080p.mp4`;
   const cachedUrl = cachedBlobs[jobState.jobId];
 
@@ -122,6 +122,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </span>
           </div>
 
+          {!isCompleted&&!isFailed&&jobState.jobId!=='pending'&&<button className="mt-4 rounded border border-[#cbd5e1] px-3 py-2 text-xs text-[#475569] hover:bg-[#f1f5f9]" onClick={async()=>{try{const r=await fetch(`/api/jobs/${jobState.jobId}/cancel`,{method:'POST'});if(!r.ok){const x=await r.json();setDownloadError(x.error||'Could not cancel render.');}}catch{setDownloadError('Could not reach the render server.');}}}>Cancel render</button>}
+          {downloadError&&!isCompleted&&<p role="alert" className="mt-3 text-xs text-[#991b1b]">{downloadError}</p>}
           {/* Render Progress Bar */}
           <div className="mt-4 h-2.5 w-full overflow-hidden rounded-full bg-[#F1F5F9]">
             <div
