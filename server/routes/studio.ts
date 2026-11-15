@@ -1091,6 +1091,12 @@ export function createStudioRouter(): express.Router {
       const graphicCardTheme = sanitizeGraphicCardTheme(req.body?.graphicCardTheme);
       const motionIntensity = sanitizeMotionIntensity(req.body?.motionIntensity);
       const matchingPreference = sanitizeMatchingPreference(req.body?.matchingPreference);
+      // Built-in sample is a non-vision demo. Keep it usable when the PC has
+      // no model, without silently mislabeling a REAL user's automatic sync.
+      const sampleVision = await getOllamaVisionStatus();
+      const sampleMatchingPreference = matchingPreference === 'auto' &&
+        !isGeminiConfigured() && !sampleVision.available
+          ? 'local' : matchingPreference;
       const transitionStyle = sanitizeTransitionStyle(req.body?.transitionStyle);
       const captionMode = sanitizeCaptionMode(
         req.body?.captionMode,
@@ -1179,7 +1185,7 @@ export function createStudioRouter(): express.Router {
         audioProxyPath,
         pauses: audioAnalysis.pauses,
         images: processedMedia,
-        matchingPreference,
+        matchingPreference: sampleMatchingPreference,
         pacingMode,
         graphicCardTheme,
       });
