@@ -17,7 +17,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -60,3 +60,32 @@ jobs:
         run: npm run test:render:long
       - name: Production build
         run: npm run build
+
+  speech:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cache local speech model and packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            workspace_data/_speech/models
+            workspace_data/_speech/pip-cache
+          key: speech-${{ runner.os }}-${{ hashFiles('server/scripts/speech-requirements.txt') }}
+      - run: npm ci --no-audit --no-fund
+      - name: Install and download the real CPU speech model
+        run: npm run setup:speech
+      - name: Verify actual spoken-word timestamps
+        run: npm run test:speech

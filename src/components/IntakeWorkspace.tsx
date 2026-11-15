@@ -45,6 +45,8 @@ export interface QueuedImageFile {
 export type IntakeTab = 'assemble' | 'blueprint';
 
 interface IntakeWorkspaceProps {
+  generateLabel?:string;
+  directorEnabled?:boolean;
   activeTab: IntakeTab;
   onChangeTab: (tab: IntakeTab) => void;
   blueprintNotice: string | null;
@@ -100,6 +102,8 @@ interface IntakeWorkspaceProps {
 }
 
 export const IntakeWorkspace: React.FC<IntakeWorkspaceProps> = ({
+  generateLabel,
+  directorEnabled,
   activeTab,
   onChangeTab,
   blueprintNotice,
@@ -260,7 +264,7 @@ export const IntakeWorkspace: React.FC<IntakeWorkspaceProps> = ({
               className="inline-flex items-center gap-2 rounded-lg border border-[#CBD5E1] bg-white px-4 py-2 text-sm font-medium text-[#0F172A] transition-colors hover:bg-[#F1F5F9] disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               <Play className="h-3.5 w-3.5 text-[#2563EB]" aria-hidden="true" />
-              <span>Load Sample Story</span>
+              <span>{directorEnabled?'Try Narrated Motion Demo':'Load Sample Story'}</span>
             </button>
           )}
         </div>
@@ -601,6 +605,7 @@ export const IntakeWorkspace: React.FC<IntakeWorkspaceProps> = ({
 
           {/* Studio Parameters: Kinetic Typography, Accent Color, SFX & Execution Strip */}
           <div className="mt-6 space-y-4 rounded-xl border border-[#E2E8F0] bg-white p-5">
+            <details><summary className="mb-4 cursor-pointer text-sm font-semibold text-[#475569]">Advanced edit settings · format, pacing, captions and motion</summary>
             <div className="flex flex-wrap items-center gap-5">
               {/* Aspect Ratio */}
               <div className="flex flex-col gap-1.5">
@@ -858,6 +863,7 @@ export const IntakeWorkspace: React.FC<IntakeWorkspaceProps> = ({
               </div>
             </div>
 
+            </details>
             {/* Bottom Row: Auto SFX + Engine + Analyze CTA */}
             <div className="flex flex-col gap-4 border-t border-[#E2E8F0] pt-4 xl:flex-row xl:items-center xl:justify-between">
               <div className="flex flex-wrap items-center gap-4">
@@ -1021,7 +1027,7 @@ export const IntakeWorkspace: React.FC<IntakeWorkspaceProps> = ({
                       <span>{analyzePhase || 'Analyzing...'}</span>
                     </>
                   ) : (
-                    <span>Analyze & Build Timeline</span>
+                    <span>{generateLabel||'Analyze & Build Timeline'}</span>
                   )}
                 </button>
               </div>

@@ -53,6 +53,11 @@ export function planDirectorTransitions(
       }
     }
 
+    if (next.motion) {
+      transition = next.motion.transition === 'cut' ? 'fade' : next.motion.transition;
+      desiredFrames = next.motion.transition === 'cut' ? 0 : Math.round(next.motion.transitionMs * fps / 1000);
+      kind = next.motion.transition === 'cut' ? 'snap' : next.motion.transition === 'fade' || next.motion.transition === 'dissolve' ? 'dissolve' : next.motion.transition === 'fadewhite' ? 'flash' : 'whip';
+    }
     // Bound overlap by BOTH adjacent shots, including micro-beats.
     const maxOverlap = Math.floor(Math.min(frameCounts[i], frameCounts[i + 1]) * 0.35);
     const planned = Math.min(desiredFrames, maxOverlap);

@@ -31,6 +31,10 @@ export async function getOllamaVisionStatus(): Promise<OllamaStatus> {
         reason: `Ollama is running, but ${model} is not installed. Run: ollama pull ${model}`,
       };
     }
+    const details=await fetch(`${endpoint()}/api/show`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model}),signal:AbortSignal.timeout(5000)});
+    if(!details.ok)throw new Error('Cannot inspect model capabilities');
+    const info=await details.json() as {capabilities?:string[]};
+    if(!info.capabilities?.includes('vision'))return {available:false,model,reason:`${model} does not advertise image/vision capability. Update Ollama and choose an installed vision model.`};
     return { available: true, model };
   } catch {
     return {

@@ -12,7 +12,9 @@
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "test:render": "tsx --test --test-concurrency=1 tests/integration/*.test.ts",
-    "test:render:long": "tsx --test --test-concurrency=1 tests/stress/*.test.ts"
+    "test:render:long": "tsx --test --test-concurrency=1 tests/stress/*.test.ts",
+    "setup:speech": "node scripts/setup-speech.mjs",
+    "test:speech": "tsx --test tests/speech/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^3.3.0",

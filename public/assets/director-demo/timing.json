@@ -1,0 +1,138 @@
+{
+  "script": "One idea can change everything. But a clear story makes it matter. Small steps build real progress. Give every word a purpose.",
+  "durationMs": 7970,
+  "words": [
+    {
+      "text": "One",
+      "startMs": 0,
+      "endMs": 400,
+      "source": "speech"
+    },
+    {
+      "text": "idea",
+      "startMs": 400,
+      "endMs": 740,
+      "source": "speech"
+    },
+    {
+      "text": "can",
+      "startMs": 740,
+      "endMs": 1000,
+      "source": "speech"
+    },
+    {
+      "text": "change",
+      "startMs": 1000,
+      "endMs": 1460,
+      "source": "speech"
+    },
+    {
+      "text": "everything.",
+      "startMs": 1460,
+      "endMs": 1980,
+      "source": "speech"
+    },
+    {
+      "text": "But",
+      "startMs": 2280,
+      "endMs": 2400,
+      "source": "speech"
+    },
+    {
+      "text": "a",
+      "startMs": 2400,
+      "endMs": 2540,
+      "source": "speech"
+    },
+    {
+      "text": "clear",
+      "startMs": 2540,
+      "endMs": 2740,
+      "source": "speech"
+    },
+    {
+      "text": "story",
+      "startMs": 2740,
+      "endMs": 3180,
+      "source": "speech"
+    },
+    {
+      "text": "makes",
+      "startMs": 3180,
+      "endMs": 3440,
+      "source": "speech"
+    },
+    {
+      "text": "it",
+      "startMs": 3440,
+      "endMs": 3680,
+      "source": "speech"
+    },
+    {
+      "text": "matter.",
+      "startMs": 3680,
+      "endMs": 4020,
+      "source": "speech"
+    },
+    {
+      "text": "Small",
+      "startMs": 4340,
+      "endMs": 4520,
+      "source": "speech"
+    },
+    {
+      "text": "steps",
+      "startMs": 4520,
+      "endMs": 4980,
+      "source": "speech"
+    },
+    {
+      "text": "build",
+      "startMs": 4980,
+      "endMs": 5360,
+      "source": "speech"
+    },
+    {
+      "text": "real",
+      "startMs": 5360,
+      "endMs": 5620,
+      "source": "speech"
+    },
+    {
+      "text": "progress.",
+      "startMs": 5620,
+      "endMs": 6160,
+      "source": "speech"
+    },
+    {
+      "text": "Give",
+      "startMs": 6480,
+      "endMs": 6560,
+      "source": "speech"
+    },
+    {
+      "text": "every",
+      "startMs": 6560,
+      "endMs": 6820,
+      "source": "speech"
+    },
+    {
+      "text": "word",
+      "startMs": 6820,
+      "endMs": 7140,
+      "source": "speech"
+    },
+    {
+      "text": "a",
+      "startMs": 7140,
+      "endMs": 7340,
+      "source": "speech"
+    },
+    {
+      "text": "purpose.",
+      "startMs": 7340,
+      "endMs": 7640,
+      "source": "speech"
+    }
+  ]
+}

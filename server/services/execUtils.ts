@@ -34,12 +34,15 @@ export function spawnStreamCommand(
   command: string,
   args: string[],
   onStderrLine?: (line: string) => void,
-  options: { cwd?: string; timeoutMs?: number } = {}
+  options: { cwd?: string; timeoutMs?: number; signal?: AbortSignal } = {}
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    if(options.signal?.aborted){reject(new Error('Render cancelled.'));return;}
     const child = spawn(command, args, { windowsHide: true, cwd: options.cwd,
       stdio: ['ignore', 'ignore', 'pipe'] });
     let stderrTail = '';
+    const abort=()=>child.kill();
+    options.signal?.addEventListener('abort',abort,{once:true});
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -58,11 +61,14 @@ export function spawnStreamCommand(
 
     child.on('error', (err) => {
       clearTimeout(timer);
+      options.signal?.removeEventListener('abort',abort);
       reject(new Error(`Failed to start ${command}: ${err.message}`));
     });
 
     child.on('close', (code) => {
       clearTimeout(timer);
+      options.signal?.removeEventListener('abort',abort);
+      if(options.signal?.aborted){reject(new Error('Render cancelled.'));return;}
       if (timedOut) {
         reject(new Error(`${command} timed out: ${stderrTail.slice(-1000)}`));
         return;

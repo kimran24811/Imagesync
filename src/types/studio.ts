@@ -1,3 +1,4 @@
+import type { DirectorSettings, DirectorReport, MotionDesign, TimedWord } from '../director/types.ts';
 export type AspectRatio = '9:16' | '16:9';
 
 export type MotionIntensity = 'subtle' | 'moderate' | 'none';
@@ -151,6 +152,7 @@ export interface UploadedAudio {
 }
 
 export interface BackgroundMusicTrack {
+  source?:'uploaded'|'procedural';
   filename: string;
   url: string;
   durationMs: number;
@@ -171,6 +173,8 @@ export interface UploadedImage {
 }
 
 export interface SceneItem {
+  motion?: MotionDesign;
+  words?: TimedWord[];
   id: string;
   index: number;
   text: string;
@@ -201,6 +205,7 @@ export interface EncoderOption {
 }
 
 export interface StudioCapabilities {
+  speech?: { available: boolean; model: string; message: string };
   ffmpegVersion: string;
   geminiConfigured: boolean;
   ollamaVisionAvailable?: boolean;
@@ -211,6 +216,8 @@ export interface StudioCapabilities {
 }
 
 export interface ProjectSession {
+  directorSettings?: DirectorSettings;
+  directorReport?: DirectorReport;
   id: string;
   createdAt: string;
   aspectRatio: AspectRatio;
@@ -237,7 +244,7 @@ export interface ProjectSession {
 export interface RenderJobState {
   jobId: string;
   projectId: string;
-  status: 'queued' | 'rendering' | 'muxing' | 'completed' | 'failed';
+  status: 'queued' | 'rendering' | 'muxing' | 'completed' | 'failed' | 'cancelled';
   progress: number;
   currentScene: number;
   totalScenes: number;

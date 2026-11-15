@@ -1,3 +1,5 @@
+import { DirectorControls } from './components/DirectorControls';
+import { DEFAULT_DIRECTOR, type DirectorSettings } from './director/types';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { BlueprintTransferPayload } from './components/BlueprintWorkspace';
 import { ExportModal } from './components/ExportModal';
@@ -42,6 +44,10 @@ interface SceneHint {
 }
 
 export default function App() {
+  const [directorSettings,setDirectorSettings] = useState<DirectorSettings>({...DEFAULT_DIRECTOR});
+  const [autoExport,setAutoExport] = useState(true);
+  const [generationSession,setGenerationSession] = useState<ProjectSession|null>(null);
+  const refreshCapabilities = useCallback(()=>{void fetch('/api/capabilities').then(r=>r.json()).then(setCapabilities).catch(()=>{});},[]);
   const [capabilities, setCapabilities] = useState<StudioCapabilities | null>(null);
 
   // Intake & Blueprint state
@@ -86,12 +92,20 @@ export default function App() {
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [renderJob, setRenderJob] = useState<RenderJobState | null>(null);
   const [recentExport, setRecentExport] = useState<RenderJobState | null>(null);
+  const currentSessionRef = useRef<ProjectSession|null>(null);
+  currentSessionRef.current=session;
+  const pollTimerRef=useRef<number|null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   const intakeRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
 
+  useEffect(()=>{if(session)localStorage.setItem('scenesync_last_project',session.id);},[session?.id]);
+  useEffect(()=>{
+    const id=localStorage.getItem('scenesync_last_project');
+    if(id)void fetch(`/api/projects/${encodeURIComponent(id)}`).then(r=>r.ok?r.json():null).then(saved=>{if(saved){setSession(saved);setScript(saved.rawScript);setDirectorSettings(saved.directorSettings??DEFAULT_DIRECTOR);}}).catch(()=>{});
+  },[]);
   useEffect(() => {
     let active = true;
     fetch('/api/capabilities')
@@ -123,6 +137,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       eventSourceRef.current?.close();
+      if(pollTimerRef.current!==null)window.clearInterval(pollTimerRef.current);
     };
   }, []);
 
@@ -369,6 +384,7 @@ export default function App() {
           musicVolumeDb,
           musicDucking,
           sceneHints,
+          directorSettings,
         }),
       });
       const startData = (await startRes.json()) as {
@@ -382,8 +398,8 @@ export default function App() {
 
       // 4. Poll async analysis job until completed
       let resolvedSession: ProjectSession | null = null;
-      for (let poll = 0; poll < 300; poll++) {
-        await new Promise((r) => setTimeout(r, 600));
+      for (let poll = 0; poll < 3600; poll++) {
+        await new Promise((r) => setTimeout(r, 1000));
         const jobRes = await fetch(`/api/analyze-jobs/${startData.jobId}`);
         if (!jobRes.ok) continue;
         const job = (await jobRes.json()) as {
@@ -404,10 +420,11 @@ export default function App() {
       }
 
       if (!resolvedSession) {
-        throw new Error('Timeline analysis timed out. Please try fewer clips or retry.');
+        throw new Error('Analysis is taking longer than expected. Your saved project will appear under Resume a saved project when processing completes.');
       }
 
       setSession(resolvedSession);
+      if(autoExport)setGenerationSession(resolvedSession);
       setCurrentTimeMs(0);
       setIsPlaying(false);
       setActiveSection('preview');
@@ -417,7 +434,7 @@ export default function App() {
     } catch (err: unknown) {
       setErrorMessage(
         err instanceof Error
-          ? `${err.message} (Check your network connection and file formats, then retry.)`
+          ? err.message
           : 'Analysis failed.'
       );
     } finally {
@@ -446,6 +463,7 @@ export default function App() {
           textEffect,
           fontStyle,
           accentColor,
+          directorSettings,
           brandKicker: brandKicker || '@scenesync.studio',
           sfxConfig,
           matchingPreference,
@@ -459,6 +477,8 @@ export default function App() {
       setScript(data.rawScript);
       setBrandKicker(data.brandKicker);
       setSession(data);
+      if(data.directorSettings)setDirectorSettings(data.directorSettings);
+      if(autoExport && data.directorSettings?.enabled)setGenerationSession(data);
       setCurrentTimeMs(0);
       setIsPlaying(false);
       setActiveSection('preview');
@@ -516,7 +536,7 @@ export default function App() {
       setSession((prev) => {
         if (!prev) return prev;
         const nextScenes = prev.scenes.map((s) =>
-          s.id === sceneId ? { ...s, ...patch } : s
+          s.id === sceneId ? { ...s, ...patch, ...(s.motion && patch.sfxCue ? {motion:{...s.motion,cues:patch.sfxCue==='none'?[]:[{atMs:s.startMs,cue:patch.sfxCue,role:'entrance' as const}]}}:{}) } : s
         );
         const updated: ProjectSession = { ...prev, scenes: nextScenes };
         void persistSessionUpdate(updated, rebalanceTimings);
@@ -822,10 +842,18 @@ export default function App() {
     void persistSessionUpdate(session, true);
   }, [session, persistSessionUpdate]);
 
-  const handleStartExport = async () => {
+  useEffect(()=>{
+    if(!generationSession)return;
+    const ready=generationSession;setGenerationSession(null);
+    void handleStartExport(ready);
+  },[generationSession]);
+
+  const handleStartExport = async (suppliedSession?:ProjectSession) => {
+    const session = suppliedSession ?? currentSessionRef.current;
     if (!session) return;
 
     eventSourceRef.current?.close();
+    if(pollTimerRef.current!==null)window.clearInterval(pollTimerRef.current);
     setExportModalOpen(true);
     setRenderJob({
       jobId: 'pending',
@@ -884,7 +912,7 @@ export default function App() {
           if (nextState.status === 'completed') {
             setRecentExport(nextState);
           }
-          if (nextState.status === 'completed' || nextState.status === 'failed') {
+          if (nextState.status === 'completed' || nextState.status === 'failed' || nextState.status === 'cancelled') {
             stopped = true;
             window.clearInterval(pollTimer);
             es.close();
@@ -894,6 +922,7 @@ export default function App() {
         }
       }, 1800);
 
+      pollTimerRef.current=pollTimer;
       const es = new EventSource(`/api/jobs/${jobId}/events`);
       eventSourceRef.current = es;
 
@@ -904,7 +933,7 @@ export default function App() {
           if (nextState.status === 'completed') {
             setRecentExport(nextState);
           }
-          if (nextState.status === 'completed' || nextState.status === 'failed') {
+          if (nextState.status === 'completed' || nextState.status === 'failed' || nextState.status === 'cancelled') {
             stopped = true;
             window.clearInterval(pollTimer);
             es.close();
@@ -951,7 +980,7 @@ export default function App() {
         hasSession={Boolean(session)}
         activeSection={activeSection}
         onSelectSection={scrollToSection}
-        onPrimaryAction={session ? handleStartExport : handleRunAnalysis}
+        onPrimaryAction={session ? ()=>void handleStartExport() : handleRunAnalysis}
         primaryLabel={session ? 'Export 1080p MP4' : 'Generate Timeline'}
         primaryDisabled={!primaryCanExecute}
       />
@@ -989,6 +1018,13 @@ export default function App() {
             </div>
           </div>
         )}
+        <div className="mx-auto max-w-[1440px] px-6 pt-6">
+          <DirectorControls settings={directorSettings} onChange={settings=>{
+            setDirectorSettings(settings);
+            if(session){setIsSaving(true);void fetch(`/api/projects/${session.id}/direct`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({settings})}).then(async r=>{const x=await r.json();if(!r.ok)throw new Error(x.error);setSession(x);}).catch(e=>setErrorMessage(e.message)).finally(()=>setIsSaving(false));}
+          }} capabilities={capabilities} onCapabilities={refreshCapabilities} disabled={isAnalyzing||isSaving} onLoad={loaded=>{setSession(loaded);setScript(loaded.rawScript);setDirectorSettings(loaded.directorSettings??DEFAULT_DIRECTOR);setCurrentTimeMs(0);setActiveSection('preview');}}/>
+          <label className="mb-2 flex items-center gap-2 text-sm text-[#475569]"><input type="checkbox" checked={autoExport} onChange={e=>setAutoExport(e.target.checked)}/>Generate the finished MP4 automatically after analysis</label>
+        </div>
         <div ref={intakeRef}>
           <IntakeWorkspace
             activeTab={intakeTab}
@@ -1041,6 +1077,8 @@ export default function App() {
             analyzePhase={analyzePhase}
             errorMessage={errorMessage}
             onRunAnalysis={handleRunAnalysis}
+            directorEnabled={directorSettings.enabled}
+            generateLabel={autoExport?"Generate Reel":"Analyze & Build Timeline"}
             onRunSample={handleRunSample}
           />
         </div>
