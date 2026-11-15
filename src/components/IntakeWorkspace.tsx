@@ -936,10 +936,11 @@ export const IntakeWorkspace: React.FC<IntakeWorkspaceProps> = ({
                     className="rounded-lg border border-[#CBD5E1] bg-white px-2.5 py-1.5 text-xs font-medium text-[#0F172A] focus:border-[#2563EB] focus:outline-none"
                   >
                     <option value="auto">
-                      Gemini Audio+Vision {capabilities?.geminiConfigured ? '(Ready)' : '(Shot-order fallback)'}
+                      Auto Vision {capabilities?.geminiConfigured ? '(Gemini ready)' : capabilities?.ollamaVisionAvailable ? '(Local AI ready)' : '(Setup needed)'}
                     </option>
-                    <option value="gemini">Gemini Audio + Vision Only</option>
-                    <option value="local">Offline Shot Order (numbered)</option>
+                    <option value="ollama">Local AI Vision (Ollama)</option>
+                    <option value="gemini">Gemini AI Vision</option>
+                    <option value="local">Manual file order (NO visual AI)</option>
                   </select>
                 </div>
 
