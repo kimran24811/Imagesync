@@ -91,12 +91,12 @@ function splitIntoPhraseChunks(
     const isLast = i === chunkCount - 1 || (i + 1) * wordsPerChunk >= totalWords;
     const chunkDur = isLast
       ? scene.endMs - cursorMs
-      : Math.round((slice.length / totalWords) * scene.durationMs);
+      : Math.round((slice.length / totalWords) * (scene.endMs - scene.startMs));
     const nextEndMs = isLast ? scene.endMs : Math.min(scene.endMs, cursorMs + chunkDur);
 
     result.push({
       startMs: cursorMs,
-      endMs: Math.max(cursorMs + 100, nextEndMs),
+      endMs: nextEndMs,
       words: slice,
     });
     cursorMs = nextEndMs;
@@ -139,7 +139,8 @@ export function buildDynamicCaptionFrames(
 
   for (let cIdx = 0; cIdx < phraseChunks.length; cIdx++) {
     const chunk = phraseChunks[cIdx];
-    const chunkDur = Math.max(120, chunk.endMs - chunk.startMs);
+    const chunkDur = chunk.endMs - chunk.startMs;
+    if (chunkDur <= 0) continue;
 
     if (
       (textEffect === 'type-reveal' || textEffect === 'kinetic-karaoke') &&
@@ -162,7 +163,7 @@ export function buildDynamicCaptionFrames(
         frames.push({
           id: `${scene.id}_c${cIdx}_w${wIdx}`,
           startMs: sMs,
-          endMs: Math.max(sMs + 50, eMs),
+          endMs: Math.min(chunk.endMs, eMs),
           isRtl,
           words: visibleWords.map((raw, idx) => {
             const display = raw.replace(/\*/g, '');
@@ -213,5 +214,5 @@ export function getActiveDynamicFrame(
   const frames = buildDynamicCaptionFrames(scene, captionMode, textEffect, aspectRatio);
   if (frames.length === 0) return null;
   const found = frames.find((f) => currentTimeMs >= f.startMs && currentTimeMs < f.endMs);
-  return found ?? frames[frames.length - 1];
+  return found ?? null;
 }

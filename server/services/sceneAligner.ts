@@ -684,7 +684,7 @@ function reconcileAcousticBoundaries(
       text: draft.text,
       startMs,
       endMs,
-      durationMs: Math.max(100, endMs - startMs),
+      durationMs: endMs - startMs,
       imageId: draft.imageId,
       matchReason: draft.matchReason,
       emotionalWeight: draft.emotionalWeight,
@@ -1017,28 +1017,15 @@ export function computeDynamicSceneTimings(
   });
   const totalWeight = weights.reduce((acc, w) => acc + w, 0) || count;
 
-  const rawDurations = weights.map((w) =>
-    Math.max(minSceneMs, Math.round((w / totalWeight) * totalMs))
-  );
-
-  const currentSum = rawDurations.reduce((a, b) => a + b, 0);
-  const scaleFactor = totalMs / currentSum;
-  const durations = rawDurations.map((d) => Math.max(minSceneMs, Math.round(d * scaleFactor)));
-
-  const diff = totalMs - durations.reduce((a, b) => a + b, 0);
-  if (diff !== 0) {
-    let adjustIdx = 0;
-    for (let i = 1; i < durations.length; i++) {
-      if (durations[i] > durations[adjustIdx]) adjustIdx = i;
-    }
-    durations[adjustIdx] = Math.max(200, durations[adjustIdx] + diff);
-  }
-
+  // Reserve every shot's minimum first, then distribute only the remainder.
+  // Scaling already-clamped durations and fixing a single longest shot can
+  // overshoot the voiceover or leave the final shot at zero/negative duration.
+  const spareMs = totalMs - minSceneMs * count;
   const boundaries: number[] = [0];
-  let running = 0;
+  let cumulativeWeight = 0;
   for (let i = 0; i < count - 1; i++) {
-    running += durations[i];
-    boundaries.push(running);
+    cumulativeWeight += weights[i];
+    boundaries.push(minSceneMs * (i + 1) + Math.round(spareMs * cumulativeWeight / totalWeight));
   }
   boundaries.push(totalMs);
 
@@ -1075,7 +1062,7 @@ export function computeDynamicSceneTimings(
   return drafts.map((draft, idx) => {
     const startMs = boundaries[idx];
     const endMs = idx === count - 1 ? totalMs : boundaries[idx + 1];
-    const durationMs = Math.max(100, endMs - startMs);
+    const durationMs = endMs - startMs;
     const snapped = snappedFlags[idx] ?? false;
     return {
       id: draft.id ?? `scene_${idx + 1}`,

@@ -17,7 +17,7 @@ import type {
   TransitionStyle,
 } from '../../src/types/studio.ts';
 import { renderGraphicCardSegmentMp4 } from './cardRenderer.ts';
-import { runCommand, spawnStreamCommand } from './execUtils.ts';
+import { spawnStreamCommand } from './execUtils.ts';
 import {
   buildSfxSchedule,
   ensureSfxBank,
@@ -25,6 +25,9 @@ import {
 } from './sfxEngine.ts';
 import { writeAssSubtitleFile } from './subtitleGenerator.ts';
 import { planDirectorTransitions } from '../../src/utils/directorTransitions.ts';
+import { planRenderTimeline } from '../../src/utils/renderTimeline.ts';
+import { probeAudioDurationMs } from './audioAnalyzer.ts';
+import { validateVideoSegment, validateRenderedMp4 } from './renderValidation.ts';
 import { probeEncoders } from './encoderProbe.ts';
 import { chooseFilterFileOption, isUnsupportedFilterFileOption, alternateFilterFileOption } from './filterOption.ts';
 
@@ -172,27 +175,8 @@ function buildEncoderArgs(encoderId: string): string[] {
     case 'h264_videotoolbox':
       return ['-c:v', 'h264_videotoolbox', '-q:v', '65', '-pix_fmt', 'yuv420p'];
     default:
-      return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p'];
+      return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-threads', '4', '-pix_fmt', 'yuv420p'];
   }
-}
-
-async function probeOutputVideoDurationMs(filePath: string): Promise<number> {
-  const result = await runCommand('ffprobe', [
-    '-v', 'error',
-    '-select_streams', 'v:0',
-    '-show_entries', 'stream=duration',
-    '-of', 'default=noprint_wrappers=1:nokey=1',
-    filePath,
-  ], 15000);
-  const seconds = Number(result.stdout.trim().split(/\s+/)[0]);
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    throw new Error('Rendered MP4 has no usable video track; cannot declare export complete.');
-  }
-  return Math.round(seconds * 1000);
-}
-
-function escapeFilterPath(filePath: string): string {
-  return filePath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
 }
 
 export async function renderProjectMp4(input: RenderProjectInput): Promise<string> {
@@ -203,11 +187,11 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
 
   const isTransitionActive = input.transitionStyle !== 'cut' && totalScenes > 1;
 
-  const sceneFrameCounts = input.scenes.map((scene) => {
-    const startF = Math.round((scene.startMs * fps) / 1000);
-    const endF = Math.round((scene.endMs * fps) / 1000);
-    return Math.max(8, endF - startF);
-  });
+  const actualAudioMs = await probeAudioDurationMs(input.audioPath);
+  if (Math.abs(actualAudioMs - input.audioDurationMs) > 1) {
+    throw new Error(`Voiceover duration changed (${actualAudioMs}ms; timeline ${input.audioDurationMs}ms). Reanalyze the audio before export.`);
+  }
+  const { frameCounts: sceneFrameCounts, totalFrames } = planRenderTimeline(input.scenes, actualAudioMs);
 
   const directorBoundaries = isTransitionActive
     ? planDirectorTransitions(input.scenes, sceneFrameCounts, input.transitionStyle, input.transitionDurationMs, fps)
@@ -225,7 +209,8 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
   await fs.mkdir(renderDir, { recursive: true });
 
   try {
-  const outputPath = path.join(input.projectDir, `scenesync_${input.projectId}_${input.jobId}.mp4`);
+  const finalPath = path.join(input.projectDir, `scenesync_${input.projectId}_${input.jobId}.mp4`);
+  const outputPath = path.join(renderDir, 'master.partial.mp4');
   const segmentPaths: string[] = [];
   let activeEncoder = input.encoderId || 'libx264';
 
@@ -258,7 +243,6 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
     const baseFrames = sceneFrameCounts[i];
     const extraFrames = useXfade ? (directorBoundaries[i]?.overlapFrames ?? 0) : 0;
     const totalSegFrames = baseFrames + extraFrames;
-    const durationSec = (totalSegFrames / fps).toFixed(4);
 
     const segPath = path.join(renderDir, `seg_${String(i).padStart(4, '0')}.mp4`);
     const progressPct = Math.round(5 + ((i + 0.2) / totalScenes) * 68);
@@ -296,6 +280,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
           throw err;
         }
       }
+      await validateVideoSegment(segPath, totalSegFrames, width, height);
       segmentPaths.push(segPath);
       continue;
     }
@@ -316,8 +301,6 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
         '-1',
         '-i',
         media.path,
-        '-t',
-        durationSec,
         '-vf',
         buildBrollVideoFilter(width, height),
         '-frames:v',
@@ -333,12 +316,14 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
         '-y',
         '-loop',
         '1',
+        '-framerate',
+        String(fps),
         '-i',
         media.path,
-        '-t',
-        durationSec,
         '-vf',
         buildPhotoVideoFilter(width, height, totalSegFrames, scene.kenBurnsDirection, 'none', scene.focalCrop),
+        '-frames:v',
+        String(totalSegFrames),
         '-r',
         String(fps),
       ];
@@ -396,8 +381,55 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
       }
     }
 
+    await validateVideoSegment(segPath, totalSegFrames, width, height);
     segmentPaths.push(segPath);
   }
+
+  // Compose each incoming transition with only TWO decoded video inputs.
+  // An all-shot xfade graph opens 50–110 1080p decoders at once. Besides memory,
+  // a single short/irregular segment can truncate the whole chain silently.
+  const composedPaths: string[] = [];
+  for (let i = 0; i < segmentPaths.length; i++) {
+    if (!useXfade) {
+      composedPaths.push(segmentPaths[i]);
+      continue;
+    }
+    const composed = path.join(renderDir, `beat_${i}.mp4`);
+    const frames = sceneFrameCounts[i];
+    const boundary = useXfade && i > 0 ? directorBoundaries[i - 1] : undefined;
+    const args = ['-hide_banner', '-loglevel', 'error', '-y', '-filter_complex_threads', '1'];
+    let graph: string;
+    if (boundary && boundary.overlapFrames > 0) {
+      args.push('-i', segmentPaths[i - 1], '-i', segmentPaths[i]);
+      graph = `[0:v]trim=start_frame=${sceneFrameCounts[i - 1]},setpts=PTS-STARTPTS,fps=30,settb=AVTB[a];` +
+        `[1:v]trim=end_frame=${frames},setpts=PTS-STARTPTS,fps=30,settb=AVTB[b];` +
+        `[a][b]xfade=transition=${boundary.transition}:duration=${boundary.overlapFrames / fps}:offset=0[v]`;
+    } else {
+      args.push('-i', segmentPaths[i]);
+      graph = `[0:v]trim=end_frame=${frames},setpts=PTS-STARTPTS[v]`;
+    }
+    // This graph has fixed size, safely below Windows' command-line limit.
+    args.push('-filter_complex', graph, '-map', '[v]', '-frames:v', String(frames), '-r', String(fps), '-an');
+    const encode = (encoder: string) => spawnStreamCommand('ffmpeg', [
+      ...args, ...buildEncoderArgs(encoder), '-video_track_timescale', '15360', composed,
+    ]);
+    emit({ status: 'muxing', progress: Math.round(73 + (i / totalScenes) * 12),
+      currentScene: i + 1, stage: `Compositing beat ${i + 1} of ${totalScenes}`,
+      message: boundary ? `Preserving ${boundary.kind} transition at ${input.scenes[i].startMs}ms` : 'Joining exact shot frames' });
+    try {
+      await encode(activeEncoder);
+    } catch (error) {
+      if (activeEncoder === 'libx264') throw error;
+      activeEncoder = 'libx264';
+      await encode(activeEncoder);
+    }
+    await validateVideoSegment(composed, frames, width, height);
+    composedPaths.push(composed);
+  }
+  // Relative, generated filenames avoid drive letters, Unicode and apostrophe
+  // escaping in concat scripts. The script itself may live anywhere on Windows.
+  const concatListPath = path.join(renderDir, 'concat.txt');
+  await fs.writeFile(concatListPath, composedPaths.map(p => `file '${path.basename(p)}'`).join('\n'), 'utf8');
 
   // 2. Generate mixed-scale kinetic ASS overlay
   let assPath: string | null = null;
@@ -419,63 +451,19 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
 
   emit({
     status: 'muxing',
-    progress: 78,
+    progress: 86,
     currentScene: totalScenes,
     stage: 'Mastering whip transitions, mixed typography & dense SFX',
     message: `${useXfade ? `Compositing ${input.transitionStyle} transitions` : 'Joining crisp cuts'}${assPath ? ` + burning ${effectiveCaptionMode} typography` : ''}${hasSfx ? ` + mixing ${sfxEvents.length} SFX cues` : ''}${hasMusic ? ' + auto-ducking music' : ''}...`,
   });
 
-  const exactAudioSec = (input.audioDurationMs / 1000).toFixed(3);
-  const needsVideoFilterPass = useXfade || Boolean(assPath);
-
-  if (!needsVideoFilterPass && !hasMusic && !hasSfx) {
-    const concatListPath = path.join(renderDir, 'concat.txt');
-    const concatContent = segmentPaths
-      .map((p) => `file '${p.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`)
-      .join('\n');
-    await fs.writeFile(concatListPath, concatContent, 'utf8');
-
-    await spawnStreamCommand('ffmpeg', [
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      '-y',
-      '-f',
-      'concat',
-      '-safe',
-      '0',
-      '-i',
-      concatListPath,
-      '-i',
-      input.audioPath,
-      '-map',
-      '0:v:0',
-      '-map',
-      '1:a:0',
-      '-c:v',
-      'copy',
-      '-c:a',
-      'aac',
-      '-b:a',
-      '192k',
-      '-ar',
-      '48000',
-      '-t',
-      exactAudioSec,
-      '-movflags',
-      '+faststart',
-      outputPath,
-    ]);
-  } else {
-    const renderMaster = async (withTransitions: boolean): Promise<void> => {
-    const masterArgs: string[] = ['-hide_banner', '-loglevel', 'error', '-y'];
+  const exactAudioSec = (actualAudioMs / 1000).toFixed(3);
+  const renderMaster = async (): Promise<void> => {
+    const masterArgs: string[] = ['-hide_banner', '-loglevel', 'error', '-y',
+      '-filter_complex_threads', '1', '-f', 'concat', '-safe', '0', '-i', concatListPath];
     const filterLines: string[] = [];
 
-    for (const seg of segmentPaths) {
-      masterArgs.push('-i', seg);
-    }
-
-    const voiceInputIdx = segmentPaths.length;
+    const voiceInputIdx = 1;
     masterArgs.push('-i', input.audioPath);
 
     let nextInputIdx = voiceInputIdx + 1;
@@ -495,53 +483,15 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
       }
     }
 
-    // Normalize EVERY input to the planned number of 30fps frames.
-    // Some image/SVG/B-roll segments have fewer frames or irregular PTS.
-    // Without this, an xfade chain can silently end after the first few beats
-    // and FFmpeg may still exit 0 while the voiceover continues to play.
-    const normalizedLabels: string[] = [];
-    for (let i = 0; i < segmentPaths.length; i++) {
-      const framesNeeded = sceneFrameCounts[i] +
-        (withTransitions ? (directorBoundaries[i]?.overlapFrames ?? 0) : 0);
-      const label = `vsrc_${i}`;
-      filterLines.push(
-        `[${i}:v]fps=${fps},tpad=stop_mode=clone:stop=${framesNeeded},trim=end_frame=${framesNeeded},setpts=N/(${fps}*TB),fps=${fps},format=yuv420p[${label}]`
-      );
-      normalizedLabels.push(label);
-    }
-
-    let videoOutLabel = normalizedLabels[0];
-    if (withTransitions && segmentPaths.length > 1) {
-      let currentLabel = normalizedLabels[0];
-      let cumFrames = sceneFrameCounts[0];
-      for (let i = 1; i < segmentPaths.length; i++) {
-        const offsetSec = (cumFrames / fps).toFixed(4);
-        const outLabel = `vx${i}`;
-        const boundary = directorBoundaries[i - 1];
-        filterLines.push(
-          `[${currentLabel}][${normalizedLabels[i]}]xfade=transition=${boundary.transition}:duration=${(boundary.overlapFrames / fps).toFixed(6)}:offset=${offsetSec}[${outLabel}]`
-        );
-        currentLabel = outLabel;
-        cumFrames += sceneFrameCounts[i];
-      }
-      videoOutLabel = currentLabel;
-    } else if (segmentPaths.length > 1) {
-      const concatInputs = normalizedLabels.map((label) => `[${label}]`).join('');
-      filterLines.push(`${concatInputs}concat=n=${segmentPaths.length}:v=1:a=0[vconcat]`);
-      videoOutLabel = 'vconcat';
-    } else {
-      filterLines.push(`[${normalizedLabels[0]}]null[vsingle]`);
-      videoOutLabel = 'vsingle';
-    }
-
-    if (assPath) {
-      filterLines.push(`[${videoOutLabel}]ass='${escapeFilterPath(assPath)}'[vfinal]`);
-      videoOutLabel = 'vfinal';
-    }
+    // Rebuild timestamps by decoded frame index even in caption-free exports.
+    // Stream-copy concat can produce short/overlapping MP4 timestamps for tiny
+    // independent GOPs despite retaining every packet and returning exit 0.
+    const videoOutLabel = 'vfinal';
+    filterLines.push(`[0:v]setpts=N/(${fps}*TB),fps=${fps}${assPath ? ',ass=filename=subtitles.ass' : ''}[${videoOutLabel}]`);
 
     // Audio filtergraph (48kHz stereo voiceover + sidechain-ducked music + grouped dense SFX cues)
     filterLines.push(
-      `[${voiceInputIdx}:a]aformat=sample_rates=48000:channel_layouts=stereo[vo_fmt]`
+      `[${voiceInputIdx}:a]atrim=duration=${exactAudioSec},asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo[vo_fmt]`
     );
 
     const amixInputs: string[] = [];
@@ -613,13 +563,13 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
     }
 
     if (amixInputs.length === 1) {
-      filterLines.push('[vo_mix]alimiter=limit=0.92[afinal]');
+      filterLines.push('[vo_mix]alimiter=limit=0.92:level=0:latency=1[afinal]');
     } else {
       filterLines.push(
         `${amixInputs.join('')}amix=inputs=${amixInputs.length}:duration=first:dropout_transition=2:normalize=0[amixed]`
       );
       filterLines.push(
-        '[amixed]alimiter=limit=0.92[afinal]'
+        '[amixed]alimiter=limit=0.92:level=0:latency=1[afinal]'
       );
     }
 
@@ -640,14 +590,14 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
       '-map',
       '[afinal]',
       ...buildEncoderArgs(activeEncoder),
+      '-r',
+      String(fps),
       '-c:a',
       'aac',
       '-b:a',
       '192k',
       '-ar',
       '48000',
-      '-t',
-      exactAudioSec,
       '-movflags',
       '+faststart',
       outputPath
@@ -657,7 +607,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
     // A codec/graph/render error must never be disguised as a version error.
     const runWithCompatibleFilterSyntax = async (args: string[]): Promise<void> => {
       try {
-        await spawnStreamCommand('ffmpeg', args);
+        await spawnStreamCommand('ffmpeg', args, undefined, { cwd: renderDir });
       } catch (err) {
         const selected = args.find((arg) =>
           arg === '-filter_complex_script' || arg === '-/filter_complex'
@@ -666,7 +616,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
         const retryArgs = args.slice();
         const optionIndex = retryArgs.indexOf(selected);
         retryArgs[optionIndex] = alternateFilterFileOption(selected);
-        await spawnStreamCommand('ffmpeg', retryArgs);
+        await spawnStreamCommand('ffmpeg', retryArgs, undefined, { cwd: renderDir });
       }
     };
 
@@ -686,39 +636,13 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
         throw err;
       }
     }
-    };
-
-    // A successful FFmpeg exit is not sufficient: reject short video streams.
-    // Prefer a complete hard-cut render to a 53s audio track with only 6s
-    // of pictures. Keep captions, music and the same SFX during recovery.
-    try {
-      await renderMaster(useXfade);
-      const initialVideoMs = await probeOutputVideoDurationMs(outputPath);
-      if (initialVideoMs + 750 < input.audioDurationMs) {
-        throw new Error(
-          `Visual track ended at ${(initialVideoMs / 1000).toFixed(2)}s before ${(input.audioDurationMs / 1000).toFixed(2)}s voiceover.`
-        );
-      }
-    } catch (err) {
-      if (!useXfade) throw err;
-      emit({
-        status: 'muxing',
-        progress: 92,
-        stage: 'Repairing visual timeline',
-        message: 'Transition render was incomplete or failed; rebuilding all beats with reliable hard cuts, captions and SFX...',
-      });
-      await fs.rm(outputPath, { force: true }).catch(() => {});
-      await renderMaster(false);
-    }
-  }
-
-  const finalVideoMs = await probeOutputVideoDurationMs(outputPath);
-  if (finalVideoMs + 750 < input.audioDurationMs) {
-    throw new Error(
-      `Incomplete video: ${(finalVideoMs / 1000).toFixed(2)}s of visuals for ${(input.audioDurationMs / 1000).toFixed(2)}s of audio. Export was rejected, not marked complete.`
-    );
-  }
-  const stat = await fs.stat(outputPath);
+  };
+  await renderMaster();
+  emit({ status: 'muxing', progress: 96, stage: 'Validating encoded output',
+    message: 'Checking every video frame, audio coverage and full MP4 decode before publishing...' });
+  await validateRenderedMp4(outputPath, actualAudioMs, totalFrames, width, height);
+  await fs.rename(outputPath, finalPath);
+  const stat = await fs.stat(finalPath);
 
   emit({
     status: 'completed',
@@ -730,8 +654,9 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
     fileSizeBytes: stat.size,
   });
 
-  return outputPath;
+  return finalPath;
   } finally {
-    await fs.rm(renderDir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(renderDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+      .catch(error => console.warn('Render temporary-file cleanup failed:', renderDir, error));
   }
 }

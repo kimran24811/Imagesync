@@ -336,12 +336,14 @@ export async function renderGraphicCardSegmentMp4(params: {
       const stepFrames =
         s === steps.length - 1 ? Math.max(2, params.frames - usedFrames) : perStepFrames;
       usedFrames += stepFrames;
-      const safePath = pngPath.replace(/\\/g, '/').replace(/'/g, "'\\''");
+      const safePath = path.basename(pngPath);
       concatEntries.push(`file '${safePath}'`);
-      concatEntries.push(`duration ${(stepFrames / fps).toFixed(4)}`);
+      concatEntries.push('option framerate 30');
+      concatEntries.push(`duration ${(stepFrames / fps).toFixed(6)}`);
     }
     const lastPng = path.join(params.renderDir, `card_${params.scene.index}_s${steps.length - 1}.png`);
-    concatEntries.push(`file '${lastPng.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`);
+    concatEntries.push(`file '${path.basename(lastPng)}'`);
+    concatEntries.push('option framerate 30');
     await fs.writeFile(stepListPath, concatEntries.join('\n'), 'utf8');
 
     const denom = Math.max(1, params.frames - 1);

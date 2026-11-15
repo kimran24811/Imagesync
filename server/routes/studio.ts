@@ -124,90 +124,53 @@ async function ensureDirs(): Promise<void> {
 }
 
 async function persistJobMetadata(job: StoredJob): Promise<void> {
+  await fs.mkdir(JOBS_META_DIR, { recursive: true });
+  const safeId = job.state.jobId.replace(/[^a-zA-Z0-9_-]/g, '');
+  const target = path.join(JOBS_META_DIR, `${safeId}.json`);
+  const temporary = `${target}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   try {
-    await fs.mkdir(JOBS_META_DIR, { recursive: true });
-    const safeId = job.state.jobId.replace(/[^a-zA-Z0-9_-]/g, '');
-    await fs.writeFile(
-      path.join(JOBS_META_DIR, `${safeId}.json`),
-      JSON.stringify({ state: job.state, outputPath: job.outputPath }),
-      'utf8'
-    );
-  } catch {
-    // Best-effort metadata persistence
+    await fs.writeFile(temporary, JSON.stringify({ state: job.state, outputPath: job.outputPath }), 'utf8');
+    await fs.rename(temporary, target);
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => {});
   }
 }
 
 async function resolveJobRecord(jobId: string): Promise<StoredJob | undefined> {
-  const safeId = jobId.replace(/[^a-zA-Z0-9_-]/g, '');
-  if (!safeId) return undefined;
-
-  const mem = jobs.get(safeId);
+  if (!/^[a-zA-Z0-9_-]+$/.test(jobId)) return undefined;
+  const mem = jobs.get(jobId);
   if (mem) return mem;
-
-  // Fallback 1: Read persisted job metadata JSON
   try {
-    const raw = await fs.readFile(path.join(JOBS_META_DIR, `${safeId}.json`), 'utf8');
+    const raw = await fs.readFile(path.join(JOBS_META_DIR, `${jobId}.json`), 'utf8');
     const parsed = JSON.parse(raw) as { state?: RenderJobState; outputPath?: string };
-    if (parsed.state) {
-      let validOutput = parsed.outputPath;
-      if (validOutput) {
-        try {
-          const stat = await fs.stat(validOutput);
-          parsed.state.fileSizeBytes = stat.size;
-        } catch {
-          validOutput = undefined;
-        }
-      }
-      const restored: StoredJob = {
-        state: parsed.state,
-        outputPath: validOutput,
-        emitter: new NodeEventEmitter(),
-      };
-      jobs.set(safeId, restored);
-      return restored;
-    }
-  } catch {
-    // Check workspace folders directly below
-  }
-
-  // Fallback 2: Scan workspace_data/*/scenesync_*_<jobId>.mp4 on disk
-  try {
-    const entries = await fs.readdir(WORKSPACE_ROOT, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith('_')) continue;
-      const candidate = path.join(WORKSPACE_ROOT, entry.name, `scenesync_${entry.name}_${safeId}.mp4`);
+    if (!parsed.state || parsed.state.jobId !== jobId) return undefined;
+    let outputPath = parsed.outputPath;
+    let failure: string | undefined;
+    if (parsed.state.status === 'completed') {
       try {
-        const stat = await fs.stat(candidate);
-        const restoredState: RenderJobState = {
-          jobId: safeId,
-          projectId: entry.name,
-          status: 'completed',
-          progress: 100,
-          currentScene: 1,
-          totalScenes: 1,
-          stage: 'Export complete',
-          message: 'Recovered mastered 1080p MP4 from workspace storage.',
-          encoderUsed: 'libx264',
-          elapsedMs: 0,
-          outputUrl: `/api/jobs/${safeId}/download`,
-          fileSizeBytes: stat.size,
-        };
-        const restored: StoredJob = {
-          state: restoredState,
-          outputPath: candidate,
-          emitter: new NodeEventEmitter(),
-        };
-        jobs.set(safeId, restored);
-        return restored;
+        if (!outputPath) throw new Error('Missing output path');
+        const stat = await fs.stat(outputPath);
+        if (stat.size === 0) throw new Error('Empty output');
+        parsed.state.fileSizeBytes = stat.size;
       } catch {
-        // Not in this project folder
+        failure = 'Completed export file is missing. Export the project again.';
       }
+    } else if (parsed.state.status !== 'failed') {
+      failure = 'Render interrupted by an application restart. Export the project again.';
     }
+    if (failure) {
+      parsed.state = { ...parsed.state, status: 'failed', stage: 'Render unavailable',
+        message: failure, error: failure, outputUrl: undefined, fileSizeBytes: undefined };
+    }
+    if (parsed.state.status !== 'completed') outputPath = undefined;
+    const restored = { state: parsed.state, outputPath, emitter: new NodeEventEmitter() };
+    jobs.set(jobId, restored);
+    return restored;
   } catch {
-    // Ignore directory read error
+    return undefined;
   }
-
-  return undefined;
+  // An MP4 filename is not proof of a successful render. In particular, never
+  // resurrect failed/partial output by scanning project directories.
 }
 
 void ensureDirs();
@@ -1491,6 +1454,14 @@ export function createStudioRouter(): express.Router {
     };
     jobs.set(jobId, jobRecord);
 
+    try {
+      await persistJobMetadata(jobRecord);
+    } catch (error) {
+      jobs.delete(jobId);
+      res.status(500).json({ error: `Cannot save render job: ${error instanceof Error ? error.message : String(error)}` });
+      return;
+    }
+    let completedState: RenderJobState | undefined;
     void renderProjectMp4({
       jobId,
       projectId: stored.session.id,
@@ -1515,16 +1486,21 @@ export function createStudioRouter(): express.Router {
       scenes,
       mediaById: stored.mediaById,
       onProgress: (nextState) => {
+        if (nextState.status === 'completed') {
+          completedState = nextState;
+          return;
+        }
         jobRecord.state = nextState;
         emitter.emit('progress', nextState);
-        if (nextState.status === 'completed' || nextState.status === 'failed') {
-          void persistJobMetadata(jobRecord);
-        }
       },
     })
-      .then((outputPath) => {
+      .then(async (outputPath) => {
+        if (!completedState) throw new Error('Render did not report a validated output.');
+        // Persist first, then expose completion with an immediately usable download.
+        await persistJobMetadata({ ...jobRecord, state: completedState, outputPath });
         jobRecord.outputPath = outputPath;
-        void persistJobMetadata(jobRecord);
+        jobRecord.state = completedState;
+        emitter.emit('progress', jobRecord.state);
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : 'FFmpeg render failed.';
@@ -1535,7 +1511,7 @@ export function createStudioRouter(): express.Router {
           message: msg,
           error: msg,
         };
-        void persistJobMetadata(jobRecord);
+        void persistJobMetadata(jobRecord).catch(error => console.error('Could not persist failed render job:', error));
         emitter.emit('progress', jobRecord.state);
       });
 
@@ -1546,66 +1522,20 @@ export function createStudioRouter(): express.Router {
   router.get('/exports/recent', async (_req, res) => {
     try {
       await fs.mkdir(JOBS_META_DIR, { recursive: true });
-      const byJobId = new Map<string, { mtimeMs: number; state: RenderJobState }>();
-
-      const metaFiles = await fs.readdir(JOBS_META_DIR).catch(() => []);
+      const completed: Array<{ mtimeMs: number; state: RenderJobState }> = [];
+      const metaFiles = await fs.readdir(JOBS_META_DIR);
       for (const file of metaFiles) {
         if (!file.endsWith('.json')) continue;
+        const job = await resolveJobRecord(file.slice(0, -5));
+        if (job?.state.status !== 'completed' || !job.outputPath) continue;
         try {
-          const fullJson = path.join(JOBS_META_DIR, file);
-          const parsed = JSON.parse(await fs.readFile(fullJson, 'utf8')) as {
-            state?: RenderJobState;
-            outputPath?: string;
-          };
-          if (parsed.state?.status === 'completed' && parsed.outputPath) {
-            const vidStat = await fs.stat(parsed.outputPath);
-            parsed.state.fileSizeBytes = vidStat.size;
-            byJobId.set(parsed.state.jobId, {
-              mtimeMs: vidStat.mtimeMs,
-              state: parsed.state,
-            });
-          }
+          const stat = await fs.stat(job.outputPath);
+          completed.push({ mtimeMs: stat.mtimeMs, state: job.state });
         } catch {
-          // Ignore stale/deleted files
+          // Deleted exports are not offered as downloads.
         }
       }
-
-      const projectDirs = await fs.readdir(WORKSPACE_ROOT, { withFileTypes: true }).catch(() => []);
-      for (const dirEntry of projectDirs) {
-        if (!dirEntry.isDirectory() || dirEntry.name.startsWith('_')) continue;
-        const projPath = path.join(WORKSPACE_ROOT, dirEntry.name);
-        const files = await fs.readdir(projPath).catch(() => []);
-        for (const f of files) {
-          const m = /^scenesync_([a-zA-Z0-9_-]+)_([a-zA-Z0-9_-]+)\.mp4$/.exec(f);
-          if (!m) continue;
-          const jobId = m[2];
-          if (byJobId.has(jobId)) continue;
-          try {
-            const vidStat = await fs.stat(path.join(projPath, f));
-            byJobId.set(jobId, {
-              mtimeMs: vidStat.mtimeMs,
-              state: {
-                jobId,
-                projectId: m[1],
-                status: 'completed',
-                progress: 100,
-                currentScene: 1,
-                totalScenes: 1,
-                stage: 'Export complete',
-                message: 'Recovered mastered 1080p MP4 from workspace storage.',
-                encoderUsed: 'libx264',
-                elapsedMs: 0,
-                outputUrl: `/api/jobs/${jobId}/download`,
-                fileSizeBytes: vidStat.size,
-              },
-            });
-          } catch {
-            // Skip unreadable file
-          }
-        }
-      }
-
-      const completed = Array.from(byJobId.values()).sort((a, b) => b.mtimeMs - a.mtimeMs);
+      completed.sort((a, b) => b.mtimeMs - a.mtimeMs);
       res.json({ latest: completed[0]?.state ?? null });
     } catch {
       res.json({ latest: null });
@@ -1656,7 +1586,7 @@ export function createStudioRouter(): express.Router {
   // 10a. Chunked binary download endpoint (<= 8MB slices so large 60MB+ videos never hit Cloud Run's 32MB response cap)
   router.get('/jobs/:jobId/chunk', async (req, res) => {
     const job = await resolveJobRecord(req.params.jobId);
-    if (!job || !job.outputPath) {
+    if (!job || job.state.status !== 'completed' || !job.outputPath) {
       res.status(404).json({ error: 'Rendered video file not available yet.' });
       return;
     }
@@ -1706,7 +1636,7 @@ export function createStudioRouter(): express.Router {
   // 10b. Direct MP4 download (with disk recovery fallback for local/small downloads)
   router.get('/jobs/:jobId/download', async (req, res) => {
     const job = await resolveJobRecord(req.params.jobId);
-    if (!job || !job.outputPath) {
+    if (!job || job.state.status !== 'completed' || !job.outputPath) {
       res.status(404).json({ error: 'Rendered video file not available yet.' });
       return;
     }
