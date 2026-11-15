@@ -740,7 +740,7 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
             <span>
               {voiceLockedCount > 0
                 ? 'Gemini Acoustic + Vision Locked'
-                : session.matchingEngineUsed === 'gemini-4-hydrogen'
+                : session.matchingEngineUsed === 'gemini' || session.matchingEngineUsed === 'gemini-vision'
                   ? 'Gemini Vision Matched'
                   : 'Rapid Concept-Paced'}
             </span>
