@@ -84,6 +84,11 @@ test('HTTP upload → edit → export → immediate download → restart; failed
     const orphan = path.join(dir, 'workspace_data', project.id, `scenesync_${project.id}_orphan.mp4`);
     await fs.writeFile(orphan, Buffer.from('partial mp4'));
     server = await start(dir);
+    const restoredProject=await json(`${server.url}/projects/${project.id}`);
+    assert.equal(restoredProject.rawScript,project.rawScript);
+    assert.equal(restoredProject.scenes[0].imageId,scenes[0].imageId);
+    assert.equal((await json(`${server.url}/projects`)).projects[0].id,project.id);
+    assert.equal((await fetch(server.url.replace('/api','')+restoredProject.images[0].url)).status,200);
     assert.equal((await json(`${server.url}/jobs/${job.jobId}`)).status, 'completed');
     assert.equal((await fetch(`${server.url}/jobs/${job.jobId}/download`)).status, 200);
     assert.equal((await json(`${server.url}/jobs/${failedJob.jobId}`)).status, 'failed');
@@ -104,4 +109,58 @@ test('HTTP upload → edit → export → immediate download → restart; failed
     await server?.close();
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('chunk retries are idempotent; automatic direction, music, queued cancellation and restart recovery work together',{timeout:240000},async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'SceneSync automatic API '));
+  let server:Awaited<ReturnType<typeof start>>|undefined;
+  try{
+    const input=await fixture(path.join(dir,'input'),2,1600);server=await start(dir);
+    const {uploadId}=await json(`${server.url}/uploads/init`,{});
+    const send=async(role:string,key:string,name:string,index:number,total:number,bytes:Buffer)=>{
+      const fd=new FormData();for(const [k,v] of Object.entries({role,fileKey:key,filename:name,chunkIndex:String(index),totalChunks:String(total),orderIndex:key==='a'?'0':'1'}))fd.append(k,v);
+      fd.append('chunk',new Blob([Uint8Array.from(bytes)]),name);
+      const r=await fetch(`${server!.url}/uploads/${uploadId}/chunk`,{method:'POST',body:fd});const x=await r.json();assert.ok(r.ok,JSON.stringify(x));return x;
+    };
+    const audio=await fs.readFile(input.audioPath),split=Math.floor(audio.length/2);
+    await send('audio','voice','voice.wav',0,2,audio.subarray(0,split));
+    assert.equal((await send('audio','voice','voice.wav',0,2,audio.subarray(0,split))).repeated,true);
+    const incomplete=await fetch(`${server.url}/uploads/${uploadId}/analyze`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({script:'An idea. Another idea.'})});
+    assert.equal(incomplete.status,400);
+    await send('audio','voice','voice.wav',1,2,audio.subarray(split));
+    assert.equal((await send('audio','voice','voice.wav',1,2,audio.subarray(split))).repeated,true);
+    let n=0;for(const media of input.mediaById.values()){await send('media',n++?'b':'a',`random_${n}.png`,0,1,await fs.readFile(media.path));}
+    const analysis=await json(`${server.url}/uploads/${uploadId}/analyze`,{script:'One idea changes everything. But the story matters.',matchingPreference:'local',pacingMode:'upload-match',directorSettings:{enabled:true,preset:'editorial-motion',alignment:'estimated',music:'auto'}});
+    let project:ProjectSession|undefined;
+    for(let i=0;i<200;i++){const x=await json(`${server.url}/analyze-jobs/${analysis.jobId}`);if(x.status==='failed')throw new Error(x.error);if(x.status==='completed'){project=x.session;break;}await new Promise(r=>setTimeout(r,100));}
+    assert.ok(project);assert.ok(project.scenes.every(s=>s.motion));assert.equal(project.backgroundMusic?.filename,'SceneSync original underscore');
+    assert.equal(project.directorReport?.engine,'rules-v1');assert.equal(project.directorReport?.alignment.engine,'estimated');
+    const first=await json(`${server.url}/projects/${project.id}/export`,{encoderId:'libx264'});
+    const queued=await json(`${server.url}/projects/${project.id}/export`,{encoderId:'libx264'});
+    const cancelled=await json(`${server.url}/jobs/${queued.jobId}/cancel`,{});assert.equal(cancelled.status,'cancelled');
+    const done=await terminal(server.url,first.jobId);assert.equal(done.status,'completed',done.error);
+    assert.equal((await fetch(`${server.url}/jobs/${queued.jobId}/download`)).status,404);
+    await server.close();server=await start(dir);
+    const loaded=await json(`${server.url}/projects/${project.id}`);
+    assert.equal(loaded.directorSettings.preset,'editorial-motion');assert.ok(loaded.scenes[0].motion);
+    assert.equal((await fetch(server.url.replace('/api','')+loaded.backgroundMusic.url)).status,200);
+    assert.equal((await json(`${server.url}/jobs/${queued.jobId}`)).status,'cancelled');
+  }finally{await server?.close();await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('the narrated director demo works without vision credentials or an installed speech model',{timeout:60000},async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'SceneSync narrated demo '));
+  const server=await start(dir);
+  try{
+    const project=await json(`${server.url}/sample`,{directorSettings:{enabled:true,preset:'editorial-motion',alignment:'required',music:'none'}});
+    assert.equal(project.scenes.length,4);assert.ok(project.scenes.every((s:{motion?:unknown;words?:unknown[]})=>s.motion&&s.words?.length));
+    assert.equal(project.directorReport.alignment.coverage,1);
+    const restyled=await json(`${server.url}/projects/${project.id}/direct`,{settings:{enabled:true,preset:'cinematic-story',alignment:'required',music:'none'}});
+    assert.equal(restyled.directorReport.alignment.coverage,1);assert.equal(restyled.directorReport.alignment.engine,'faster-whisper');
+    assert.equal(restyled.directorSettings.preset,'cinematic-story');
+    assert.match(project.directorReport.notices.join(' '),/precomputed speech/);
+    assert.ok(project.audio.durationMs>7000&&project.audio.durationMs<9000);
+    assert.equal((await fetch(server.url.replace('/api','')+project.audio.url)).status,200);
+    assert.equal((await json(`${server.url}/projects/${project.id}`)).rawScript,project.rawScript);
+  }finally{await server.close();await fs.rm(dir,{recursive:true,force:true});}
 });

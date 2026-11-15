@@ -33,10 +33,16 @@ export async function directSession(
     words: estimateWords(session.scenes),
     notice: 'Timing uses scene estimates rather than recognized speech.',
   };
-  const speech = await getSpeechStatus();
-  if (settings.alignment !== 'estimated' && speech.available) {
-    alignment = await alignSpeech(audioPath, session.rawScript, session.audio.durationMs);
-  } else if (settings.alignment === 'required') throw new Error(speech.message);
+  const savedWords=session.scenes.flatMap(scene=>scene.words??[]);
+  const savedAlignment=session.directorReport?.alignment;
+  const sameScript=savedWords.map(word=>word.text).join(' ').replace(/\s+/g,' ').trim()===session.rawScript.replace(/\s+/g,' ').trim();
+  if(settings.alignment!=='estimated' && savedAlignment?.engine==='faster-whisper' && sameScript){
+    alignment={...savedAlignment,words:savedWords};
+  }else{
+    const speech=await getSpeechStatus();
+    if(settings.alignment!=='estimated'&&speech.available)alignment=await alignSpeech(audioPath,session.rawScript,session.audio.durationMs);
+    else if(settings.alignment==='required')throw new Error(speech.message);
+  }
   if (settings.alignment === 'required' && alignment.coverage < 0.9)
     throw new Error(
       `Speech alignment matched only ${Math.round(alignment.coverage * 100)}% of words. Check the script or choose automatic timing explicitly.`
