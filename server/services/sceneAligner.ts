@@ -20,7 +20,7 @@ import {
   ALL_ACTIVE_SFX_CUES,
   inferDefaultSfxCue,
 } from '../../src/utils/sfxSchedule.ts';
-import { getGeminiClient, isGeminiConfigured } from './geminiClient.ts';
+import { getGeminiBlueprintModel, getGeminiClient, isGeminiConfigured } from './geminiClient.ts';
 import { orderMediaByShotNumber, selectMediaForBeat } from '../../src/utils/orderedMedia.ts';
 import { matchCaptionsToScriptBeats } from '../../src/utils/semanticMatching.ts';
 import { captionAllMedia, getOllamaVisionStatus } from './ollamaVision.ts';
@@ -52,7 +52,7 @@ interface AlignScenesInput {
 interface AlignScenesOutput {
   scenes: SceneItem[];
   imageSummaries: Record<string, string>;
-  engineUsed: 'gemini-4-hydrogen' | 'gemini-vision' | 'ollama-vision' | 'local-heuristic';
+  engineUsed: 'gemini' | 'gemini-vision' | 'ollama-vision' | 'local-heuristic';
   fallbackNotice?: string;
 }
 
@@ -494,7 +494,7 @@ ${cleanScript}
   parts.push({ text: promptText });
 
   const response = await client.models.generateContent({
-    model: 'gemini-4-hydrogen',
+    model: getGeminiBlueprintModel(),
     contents: { parts },
     config: {
       systemInstruction:
@@ -647,7 +647,7 @@ ${cleanScript}
   return {
     scenes: timedScenes,
     imageSummaries,
-    engineUsed: 'gemini-4-hydrogen',
+    engineUsed: 'gemini',
   };
 }
 
