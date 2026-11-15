@@ -25,6 +25,8 @@ import {
 } from './sfxEngine.ts';
 import { writeAssSubtitleFile } from './subtitleGenerator.ts';
 import { planDirectorTransitions } from '../../src/utils/directorTransitions.ts';
+import { probeEncoders } from './encoderProbe.ts';
+import { chooseFilterFileOption, isUnsupportedFilterFileOption, alternateFilterFileOption } from './filterOption.ts';
 
 export interface RenderProjectInput {
   jobId: string;
@@ -594,8 +596,14 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
     const filterScriptPath = path.join(renderDir, 'master_filter.txt');
     await fs.writeFile(filterScriptPath, filterLines.join(';\n'), 'utf8');
 
+    // FFmpeg <=7 supports -filter_complex_script; FFmpeg >=8 removed it
+    // in favor of the file-loading argument syntax -/filter_complex.
+    // Keep the graph in a file; 50-60 shot renders can exceed Windows'
+    // 32K command-line limit if we inline this string.
+    const { ffmpegVersion } = await probeEncoders();
+    const filterOption = chooseFilterFileOption(ffmpegVersion);
     masterArgs.push(
-      '-filter_complex_script',
+      filterOption,
       filterScriptPath,
       '-map',
       `[${videoOutLabel}]`,
@@ -615,10 +623,27 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
       outputPath
     );
 
+    // Retry only when the installed FFmpeg build rejects the option itself.
+    // A codec/graph/render error must never be disguised as a version error.
+    const runWithCompatibleFilterSyntax = async (args: string[]): Promise<void> => {
+      try {
+        await spawnStreamCommand('ffmpeg', args);
+      } catch (err) {
+        const selected = args.find((arg) =>
+          arg === '-filter_complex_script' || arg === '-/filter_complex'
+        );
+        if (!selected || !isUnsupportedFilterFileOption(err, selected)) throw err;
+        const retryArgs = args.slice();
+        const optionIndex = retryArgs.indexOf(selected);
+        retryArgs[optionIndex] = alternateFilterFileOption(selected);
+        await spawnStreamCommand('ffmpeg', retryArgs);
+      }
+    };
+
     try {
-      await spawnStreamCommand('ffmpeg', masterArgs);
+      await runWithCompatibleFilterSyntax(masterArgs);
     } catch (err) {
-      if (activeEncoder !== 'libx264') {
+      if (activeEncoder !== 'libx264' && !isUnsupportedFilterFileOption(err)) {
         activeEncoder = 'libx264';
         const fallbackArgs = masterArgs.slice();
         const cvIdx = fallbackArgs.indexOf('-c:v');
@@ -626,7 +651,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
           const caIdx = fallbackArgs.indexOf('-c:a');
           fallbackArgs.splice(cvIdx, caIdx - cvIdx, ...buildEncoderArgs('libx264'));
         }
-        await spawnStreamCommand('ffmpeg', fallbackArgs);
+        await runWithCompatibleFilterSyntax(fallbackArgs);
       } else {
         throw err;
       }
