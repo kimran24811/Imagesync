@@ -5,11 +5,19 @@ on:
   push:
     branches:
       - feature/director-cut-engine-v1
+      - codex/milestone-1-render-reliability
+
+permissions:
+  contents: read
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -17,28 +25,38 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install FFmpeg on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+      - name: Install Windows FFmpeg 9.0.2 essentials
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ffmpeg --version=9.0.2 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg 9.0.2 installation failed' }
+          $bins = Get-ChildItem 'C:\ProgramData\chocolatey\lib\ffmpeg' -Filter ffmpeg.exe -Recurse
+          if (!$bins) { throw 'FFmpeg binary not found' }
+          $bins[0].DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Verify required media tools
+        run: |
+          ffmpeg -version
+          ffprobe -version
+      - name: Require Windows FFmpeg 9.0.2
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = ffmpeg -version | Select-Object -First 1
+          if ($version -notmatch 'version (?:n)?9\.0\.2(?:[-\s]|$)') { throw "Wrong FFmpeg build: $version" }
       - name: TypeScript checks
         run: npm run lint
-      - name: Director Cut tests
+      - name: Unit and PNG graphic-card tests
         run: npm test
+      - name: Real FFmpeg end-to-end render regressions (no skips)
+        run: npm run test:render
+      - name: One-minute 110-asset stress render
+        run: npm run test:render:long
       - name: Production build
         run: npm run build
-
-  windows-svg-card-smoke:
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Set up Node 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Install Windows-native SVG-to-PNG renderer
-        run: npm install --no-audit --no-fund
-      - name: Install matching FFmpeg 9.0.2 essentials build
-        run: choco install ffmpeg --version=9.0.2 -y --no-progress
-      - name: Verify PNG rendering and FFmpeg input on Windows
-        run: npx tsx --test tests/graphicCardRender.test.ts

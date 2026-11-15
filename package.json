@@ -8,9 +8,11 @@
     "start": "node server.ts",
     "build": "vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "node -e \"for (const p of ['dist', 'server.js']) require('node:fs').rmSync(p, {recursive:true, force:true})\"",
     "lint": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "test:render": "tsx --test --test-concurrency=1 tests/integration/*.test.ts",
+    "test:render:long": "tsx --test --test-concurrency=1 tests/stress/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^3.3.0",
