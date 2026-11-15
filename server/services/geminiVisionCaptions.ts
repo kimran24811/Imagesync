@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Type } from '@google/genai';
-import { getGeminiClient } from './geminiClient.ts';
+import { getGeminiClient, getGeminiVisionModel } from './geminiClient.ts';
 import type { VisionMedia } from './ollamaVision.ts';
 
 export async function captionAllMediaWithGemini(
@@ -12,7 +12,7 @@ export async function captionAllMediaWithGemini(
 ): Promise<Record<string, string>> {
   const client = getGeminiClient();
   if (!client) throw new Error('Gemini API key is not configured.');
-  const model = process.env.GEMINI_VISION_MODEL?.trim() || 'gemini-3.5-flash-lite';
+  const model = getGeminiVisionModel();
   await fs.mkdir(cacheDir, { recursive: true });
 
   const output: Record<string, string> = {};
