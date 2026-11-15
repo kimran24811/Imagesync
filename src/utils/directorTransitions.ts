@@ -1,7 +1,6 @@
 import type { SceneItem, TransitionStyle } from '../types/studio.ts';
 
-/** Frame-exact transition planning. A one-frame fade approximates a snap cut
- * inside a continuous xfade chain; mode "cut" uses literal zero-overlap concat. */
+/** Frame-exact transitions. Snap cuts have zero overlap. */
 export interface DirectorBoundary {
   kind: 'snap' | 'whip' | 'flash' | 'dissolve';
   transition: string;
@@ -30,7 +29,7 @@ export function planDirectorTransitions(
     const next = scenes[i + 1];
     let kind: DirectorBoundary['kind'] = 'snap';
     let transition = 'fade';
-    let desiredFrames = 1;
+    let desiredFrames = 0;
 
     if (style === 'crossfade') {
       kind = 'dissolve';
@@ -55,11 +54,12 @@ export function planDirectorTransitions(
     }
 
     // Bound overlap by BOTH adjacent shots, including micro-beats.
-    const maxOverlap = Math.max(1, Math.floor(Math.min(frameCounts[i], frameCounts[i + 1]) * 0.35));
-    const overlapFrames = Math.max(1, Math.min(desiredFrames, maxOverlap));
+    const maxOverlap = Math.floor(Math.min(frameCounts[i], frameCounts[i + 1]) * 0.35);
+    const planned = Math.min(desiredFrames, maxOverlap);
+    const overlapFrames = planned <= 1 ? 0 : planned;
     boundaries.push({
-      kind: overlapFrames === 1 ? 'snap' : kind,
-      transition: overlapFrames === 1 ? 'fade' : transition,
+      kind: overlapFrames === 0 ? 'snap' : kind,
+      transition: overlapFrames === 0 ? 'fade' : transition,
       overlapFrames,
     });
   }

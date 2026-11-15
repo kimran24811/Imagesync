@@ -31,7 +31,7 @@ export async function probeAudioDurationMs(audioPath: string): Promise<number> {
     throw new Error('The uploaded file does not contain a readable audio stream.');
   }
 
-  const rawDurationSec = Number(parsed.format?.duration ?? audioStream.duration ?? 0);
+  const rawDurationSec = Number(audioStream.duration ?? parsed.format?.duration ?? 0);
   if (!Number.isFinite(rawDurationSec) || rawDurationSec <= 0.1) {
     throw new Error('Audio track duration is too short or unreadable.');
   }
@@ -89,7 +89,7 @@ export async function analyzeAudioTrack(audioPath: string): Promise<AudioAnalysi
     throw new Error('The uploaded file does not contain a readable audio stream.');
   }
 
-  const rawDurationSec = Number(parsed.format?.duration ?? audioStream.duration ?? 0);
+  const rawDurationSec = Number(audioStream.duration ?? parsed.format?.duration ?? 0);
   if (!Number.isFinite(rawDurationSec) || rawDurationSec <= 0.1) {
     throw new Error('Audio track duration is too short or unreadable.');
   }

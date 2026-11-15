@@ -33,15 +33,22 @@ export async function runCommand(
 export function spawnStreamCommand(
   command: string,
   args: string[],
-  onStderrLine?: (line: string) => void
+  onStderrLine?: (line: string) => void,
+  options: { cwd?: string; timeoutMs?: number } = {}
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true });
+    const child = spawn(command, args, { windowsHide: true, cwd: options.cwd,
+      stdio: ['ignore', 'ignore', 'pipe'] });
     let stderrTail = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, options.timeoutMs ?? 20 * 60_000);
 
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
-      stderrTail = (stderrTail + text).slice(-2000);
+      stderrTail = (stderrTail + text).slice(-6000);
       if (onStderrLine) {
         for (const line of text.split(/\r?\n/)) {
           if (line.trim()) onStderrLine(line);
@@ -50,14 +57,20 @@ export function spawnStreamCommand(
     });
 
     child.on('error', (err) => {
+      clearTimeout(timer);
       reject(new Error(`Failed to start ${command}: ${err.message}`));
     });
 
     child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${command} timed out: ${stderrTail.slice(-1000)}`));
+        return;
+      }
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`${command} exited with code ${code}: ${stderrTail.slice(-500)}`));
+        reject(new Error(`${command} exited with code ${code}: ${stderrTail.slice(-6000)}`));
       }
     });
   });
