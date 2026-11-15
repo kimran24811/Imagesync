@@ -104,6 +104,11 @@ frames that should span 0.233s. Master timestamps are now regenerated from decod
 frame index. The uneven-clause allocator also reproduced a zero-duration final
 shot in a two-shot 200ms timeline; minimum reservation fixes that overshoot.
 
+The first Windows CI run verified FFmpeg 9.0.2 essentials and passed all 31
+unit/card tests and all eight renderer regressions. The HTTP harness failed to
+start because Node's `--import` received a Windows drive path instead of a file URL.
+The harness now passes the loader URL's `href`; rerun results are tracked on the PR.
+
 ### Contract and tradeoffs
 
 - A supplied scene timeline must be contiguous and cover the probed audio duration.
@@ -126,7 +131,8 @@ shot in a two-shot 200ms timeline; minimum reservation fixes that overshoot.
   files are left untouched. Projects themselves still live in memory.
 - Windows-friendly relative generated filenames avoid filter/concat escaping of
   drive letters, apostrophes, commas and Unicode directories. Tests exercise these
-  paths on Linux; native Windows execution remains a required separate check.
+  paths on Linux and in native Windows CI; the actual AMD GPU/driver still
+  requires acceptance on the PC.
 
 ### Windows PC acceptance checks
 

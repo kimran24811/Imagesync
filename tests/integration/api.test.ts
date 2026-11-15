@@ -11,7 +11,7 @@ import { fixture } from './fixtures.ts';
 
 async function start(cwd: string) {
   const child = fork(fileURLToPath(new URL('./apiServer.ts', import.meta.url)), [], { cwd,
-    execArgv: ['--import', fileURLToPath(new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url))],
+    execArgv: ['--import', new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url).href],
     env: { ...process.env, GEMINI_API_KEY: '', OLLAMA_HOST: 'http://127.0.0.1:1' },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   let errors = '';
