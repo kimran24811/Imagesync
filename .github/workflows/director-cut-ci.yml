@@ -38,5 +38,7 @@ jobs:
           node-version: '22'
       - name: Install Windows-native SVG-to-PNG renderer
         run: npm install --no-audit --no-fund
+      - name: Install matching FFmpeg 9.0.2 essentials build
+        run: choco install ffmpeg --version=9.0.2 -y --no-progress
       - name: Verify PNG rendering and FFmpeg input on Windows
         run: npx tsx --test tests/graphicCardRender.test.ts
