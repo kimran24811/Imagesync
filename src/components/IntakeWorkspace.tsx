@@ -936,10 +936,10 @@ export const IntakeWorkspace: React.FC<IntakeWorkspaceProps> = ({
                     className="rounded-lg border border-[#CBD5E1] bg-white px-2.5 py-1.5 text-xs font-medium text-[#0F172A] focus:border-[#2563EB] focus:outline-none"
                   >
                     <option value="auto">
-                      Gemini Audio+Vision {capabilities?.geminiConfigured ? '(Ready)' : '(Local fallback)'}
+                      Gemini Audio+Vision {capabilities?.geminiConfigured ? '(Ready)' : '(Shot-order fallback)'}
                     </option>
                     <option value="gemini">Gemini Audio + Vision Only</option>
-                    <option value="local">Offline Local Matching</option>
+                    <option value="local">Offline Shot Order (numbered)</option>
                   </select>
                 </div>
 
