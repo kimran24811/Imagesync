@@ -15,7 +15,7 @@ SceneSync can inspect **every image** and choose visuals for spoken script beats
 5. Upload your real voiceover, its *exact* script, and all your images in a batch. No renaming is necessary.
 6. Click **Analyze & Build Timeline**, then inspect the scene match explanations and low-confidence warnings. Export after reviewing.
 
-Alternatively, supply a Gemini API key in `.env` and choose Gemini Vision. Gemini may incur API charges. Its captioning path processes all images in batches, rather than only the first 36. The preferred default model is `gemini-3.5-flash-lite`.
+Alternatively, [configure a **new private Gemini API key**](./GEMINI_SETUP.md) in your local `.env` and choose Gemini Vision. Never place the key in a GitHub commit. Gemini may incur API charges. Its captioning path processes all images in batches, rather than only the first 36. The preferred default model is `gemini-3.5-flash-lite`.
 
 ## What the visual matcher does
 
