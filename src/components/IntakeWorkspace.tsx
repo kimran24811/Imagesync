@@ -159,6 +159,22 @@ export const IntakeWorkspace: React.FC<IntakeWorkspaceProps> = ({
 
   const [audioDragOver, setAudioDragOver] = useState(false);
   const [imageDragOver, setImageDragOver] = useState(false);
+  const [geminiChecking, setGeminiChecking] = useState(false);
+  const [geminiTestResult, setGeminiTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const testGeminiConnection = async () => {
+    setGeminiChecking(true);
+    setGeminiTestResult(null);
+    try {
+      const response = await fetch('/api/gemini/check', { method: 'POST' });
+      const data = await response.json() as { ok?: boolean; message?: string };
+      setGeminiTestResult({ ok: response.ok && data.ok === true, message: data.message || 'Gemini connection check failed.' });
+    } catch {
+      setGeminiTestResult({ ok: false, message: 'Could not reach SceneSync. Check the terminal and try again.' });
+    } finally {
+      setGeminiChecking(false);
+    }
+  };
 
   const wordCount = useMemo(() => {
     const trimmed = script.trim();
@@ -936,12 +952,38 @@ export const IntakeWorkspace: React.FC<IntakeWorkspaceProps> = ({
                     className="rounded-lg border border-[#CBD5E1] bg-white px-2.5 py-1.5 text-xs font-medium text-[#0F172A] focus:border-[#2563EB] focus:outline-none"
                   >
                     <option value="auto">
-                      Auto Vision {capabilities?.geminiConfigured ? '(Gemini ready)' : capabilities?.ollamaVisionAvailable ? '(Local AI ready)' : '(Setup needed)'}
+                      Auto Vision {capabilities?.geminiConfigured ? '(Gemini key found)' : capabilities?.ollamaVisionAvailable ? '(Local AI ready)' : '(Setup needed)'}
                     </option>
                     <option value="ollama">Local AI Vision (Ollama)</option>
                     <option value="gemini">Gemini AI Vision</option>
                     <option value="local">Manual file order (NO visual AI)</option>
                   </select>
+                  {capabilities?.geminiConfigured && (
+                    <button
+                      type="button"
+                      disabled={geminiChecking || isAnalyzing}
+                      onClick={testGeminiConnection}
+                      className="rounded-md border border-[#CBD5E1] bg-white px-2.5 py-1.5 text-xs font-medium text-[#0F172A] disabled:opacity-50"
+                      title="Safely verify the server's Gemini API key. The key never goes to the browser."
+                    >
+                      {geminiChecking ? 'Testing Gemini...' : 'Test Gemini'}
+                    </button>
+                  )}
+                  {!capabilities?.geminiConfigured && (
+                    <a
+                      href="https://github.com/kimran24811/Imagesync/blob/feature/director-cut-engine-v1/docs/GEMINI_SETUP.md"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs text-[#2563EB] underline"
+                    >
+                      Set up Gemini
+                    </a>
+                  )}
+                  {geminiTestResult && (
+                    <span className={`max-w-xs text-xs ${geminiTestResult.ok ? 'text-[#15803D]' : 'text-[#B91C1C]'}`} role="status">
+                      {geminiTestResult.message}
+                    </span>
+                  )}
                 </div>
 
                 {/* Encoder Selection */}
