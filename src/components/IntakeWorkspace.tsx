@@ -814,7 +814,7 @@ export const IntakeWorkspace: React.FC<IntakeWorkspaceProps> = ({
                         : 'text-[#475569] hover:text-[#0F172A]'
                     }`}
                   >
-                    Whip Dynamic 0.14s
+                    Director Cuts · Snap + Whip
                   </button>
                   <button
                     type="button"
