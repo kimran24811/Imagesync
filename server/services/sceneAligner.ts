@@ -22,6 +22,9 @@ import {
 } from '../../src/utils/sfxSchedule.ts';
 import { getGeminiClient, isGeminiConfigured } from './geminiClient.ts';
 import { orderMediaByShotNumber, selectMediaForBeat } from '../../src/utils/orderedMedia.ts';
+import { matchCaptionsToScriptBeats } from '../../src/utils/semanticMatching.ts';
+import { captionAllMedia, getOllamaVisionStatus } from './ollamaVision.ts';
+import { captionAllMediaWithGemini } from './geminiVisionCaptions.ts';
 
 export interface InternalMediaPayload {
   id: string;
@@ -42,12 +45,14 @@ interface AlignScenesInput {
   matchingPreference: MatchingPreference;
   pacingMode?: PacingMode;
   graphicCardTheme?: GraphicCardTheme;
+  visionCacheDir?: string;
+  onVisualProgress?: (completed: number, total: number) => void;
 }
 
 interface AlignScenesOutput {
   scenes: SceneItem[];
   imageSummaries: Record<string, string>;
-  engineUsed: 'gemini-4-hydrogen' | 'local-heuristic';
+  engineUsed: 'gemini-4-hydrogen' | 'gemini-vision' | 'ollama-vision' | 'local-heuristic';
   fallbackNotice?: string;
 }
 
@@ -230,67 +235,50 @@ export async function alignScriptAndImages(
     pacingMode
   );
 
-  const wantsGemini = input.matchingPreference !== 'local';
-  const client = wantsGemini ? getGeminiClient() : null;
-
-  if (wantsGemini && client) {
-    try {
-      const geminiResult = await alignWithGeminiMultimodal(
-        client,
-        cleanScript,
-        input.audioDurationMs,
-        input.audioProxyPath,
-        input.pauses,
-        input.images,
-        targetBeatCount,
-        pacingMode,
-        cardTheme
-      );
-      return geminiResult;
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Gemini multimodal request failed';
-      if (input.matchingPreference === 'gemini') {
-        throw new Error(`Gemini alignment failed: ${msg}`);
-      }
-      const fallback = alignWithLocalHeuristic(
-        cleanScript,
-        input.audioDurationMs,
-        input.pauses,
-        input.images,
-        targetBeatCount,
-        pacingMode,
-        cardTheme
-      );
-      return {
-        ...fallback,
-        fallbackNotice: `Used local rapid-beat matching (${msg.slice(0, 140)}).`,
-      };
-    }
-  }
-
-  const fallback = alignWithLocalHeuristic(
-    cleanScript,
-    input.audioDurationMs,
-    input.pauses,
-    input.images,
-    targetBeatCount,
-    pacingMode,
-    cardTheme
-  );
-
-  if (wantsGemini && !isGeminiConfigured()) {
+  if (input.matchingPreference === 'local') {
     return {
-      ...fallback,
-      fallbackNotice:
-        'Gemini is not configured. Images are placed in numbered shot / upload order, NOT matched by visual content. Review the storyboard and make sure the narration script exactly matches the audio.',
+      ...alignWithLocalHeuristic(cleanScript, input.audioDurationMs, input.pauses, input.images, targetBeatCount, pacingMode, cardTheme),
+      fallbackNotice: 'Manual file-order mode selected. SceneSync did not inspect image contents; switch to Auto Vision to match unlabeled pictures automatically.',
     };
   }
 
-  return {
-    ...fallback,
-    fallbackNotice:
-      'Offline shot-order matching: Scene 1 uses the first numbered/uploaded image, scene 2 the next, etc. Visual contents were not analyzed; review scene assignments and ensure the audio matches the pasted script.',
+  const client = getGeminiClient();
+  const useGemini = async (): Promise<AlignScenesOutput> => {
+    if (!client) throw new Error('Gemini Vision requires GEMINI_API_KEY in .env.');
+    const summaries = await captionAllMediaWithGemini(
+      input.images, input.visionCacheDir || 'workspace_data/_vision_cache', input.onVisualProgress
+    );
+    return alignWithVisualCaptions(cleanScript, input.audioDurationMs, input.pauses, input.images, targetBeatCount, pacingMode, cardTheme, summaries, 'gemini-vision');
   };
+  const useOllama = async (): Promise<AlignScenesOutput> => {
+    const summaries = await captionAllMedia(
+      input.images, input.visionCacheDir || 'workspace_data/_vision_cache', input.onVisualProgress
+    );
+    return alignWithVisualCaptions(cleanScript, input.audioDurationMs, input.pauses, input.images, targetBeatCount, pacingMode, cardTheme, summaries, 'ollama-vision');
+  };
+
+  if (input.matchingPreference === 'gemini') return useGemini();
+  if (input.matchingPreference === 'ollama') return useOllama();
+
+  // AUTO must never silently generate a random/filename-based edit when no
+  // image model can actually inspect the user's 110 unnumbered pictures.
+  const ollama = await getOllamaVisionStatus();
+  if (client) {
+    try {
+      return await useGemini();
+    } catch (error) {
+      if (ollama.available) return useOllama();
+      throw new Error(`Gemini visual matching failed: ${error instanceof Error ? error.message : String(error)}. ${ollama.reason || ''}`);
+    }
+  }
+  if (ollama.available) return useOllama();
+
+  throw new Error(
+    'Automatic picture-to-narration matching needs an image-understanding engine. ' +
+    'No Gemini API key or local Ollama vision model is ready. ' +
+    (ollama.reason || 'Install Ollama and pull a vision model.') +
+    ' Your filenames do NOT need to be numbered. For a non-AI montage, select Manual file-order mode explicitly.'
+  );
 }
 
 /**
@@ -870,6 +858,60 @@ export function smartTokenizeScript(rawScript: string, targetCount: number): str
   }
 
   return clauses;
+}
+
+function alignWithVisualCaptions(
+  cleanScript: string,
+  audioDurationMs: number,
+  pauses: SpeechPause[],
+  images: InternalMediaPayload[],
+  targetBeatCount: number,
+  pacingMode: PacingMode,
+  cardTheme: GraphicCardTheme,
+  imageSummaries: Record<string, string>,
+  engineUsed: 'gemini-vision' | 'ollama-vision'
+): AlignScenesOutput {
+  const clauses = smartTokenizeScript(cleanScript, targetBeatCount);
+  const matches = matchCaptionsToScriptBeats(
+    clauses,
+    images.map((image) => ({
+      id: image.id,
+      description: imageSummaries[image.id] || '',
+    }))
+  );
+  const rawDrafts: SceneTimingDraft[] = clauses.map((clause, idx) => {
+    const match = matches[idx];
+    const words = clause.trim().split(/\s+/);
+    const emotionalWeight = /[!?]/.test(clause) ? 1.25 :
+      words.length >= 7 ? 1.12 : words.length <= 3 ? 0.9 : 1;
+    const accentPhrase = inferAccentPhrase(clause);
+    return {
+      text: clause,
+      imageId: match.id,
+      matchReason: `AI image-description match: ${match.explanation}`,
+      emotionalWeight,
+      kenBurnsDirection: sanitizeDirection(undefined, idx, 'media'),
+      beatKind: 'media',
+      focalCrop: 'full',
+      captionZone: sanitizeCaptionZone(undefined, clause, idx),
+      kicker: idx === 0 ? 'THE HOOK' : `BEAT ${String(idx + 1).padStart(2, '0')}`,
+      accentPhrase,
+      sfxCue: inferDefaultSfxCue(clause, idx, accentPhrase, 'media'),
+    };
+  });
+  const scenes = computeDynamicSceneTimings(
+    diversifyConsecutiveBeats(rawDrafts, images, pacingMode, cardTheme),
+    audioDurationMs, pauses
+  );
+  const lowConfidence = matches.filter((item) => item.confidence === 'low').length;
+  return {
+    scenes,
+    imageSummaries,
+    engineUsed,
+    fallbackNotice: lowConfidence
+      ? `Visual AI analyzed all ${images.length} images, but ${lowConfidence} of ${scenes.length} beats have low match confidence. Review those image assignments in Storyboard before export. Speech positions remain estimated from narration duration and detected pauses.`
+      : `Visual AI analyzed all ${images.length} images without needing filenames or numbers. Speech positions are estimated from narration duration and detected pauses.`,
+  };
 }
 
 function alignWithLocalHeuristic(
