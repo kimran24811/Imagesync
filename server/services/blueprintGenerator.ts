@@ -13,7 +13,7 @@ import type {
   TtsVoiceName,
 } from '../../src/types/studio.ts';
 import { inferDefaultSfxCue } from '../../src/utils/sfxSchedule.ts';
-import { getGeminiClient, isGeminiConfigured } from './geminiClient.ts';
+import { getGeminiBlueprintModel, getGeminiClient, isGeminiConfigured } from './geminiClient.ts';
 
 export interface ArtStylePresetDefinition {
   id: ArtStylePresetId;
@@ -307,7 +307,7 @@ export async function generateStoryBlueprint(
         continuityPrefix: preset.continuityPrefix,
         fullScript: finalScenes.map((s) => s.spokenLine).join(' '),
         scenes: finalScenes.map((s, idx) => ({ ...s, index: idx })),
-        engineUsed: 'gemini-4-hydrogen',
+        engineUsed: 'gemini',
       };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Gemini request failed';
@@ -378,7 +378,7 @@ CRITICAL MICRO-BEAT RULES:
    - imagePrompt: if beatKind is 'media', full copy-paste prompt embedding characterAnchor + masterStyleAnchor + single-subject visualAction + "${aspectHint}". Never put text overlays inside imagePrompt.`;
 
   const response = await client.models.generateContent({
-    model: 'gemini-4-hydrogen',
+    model: getGeminiBlueprintModel(),
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     config: {
       systemInstruction:
