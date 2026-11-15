@@ -24,6 +24,7 @@ import {
   type ActiveSfxCue,
 } from './sfxEngine.ts';
 import { writeAssSubtitleFile } from './subtitleGenerator.ts';
+import { planDirectorTransitions } from '../../src/utils/directorTransitions.ts';
 
 export interface RenderProjectInput {
   jobId: string;
@@ -177,46 +178,13 @@ function escapeFilterPath(filePath: string): string {
   return filePath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
 }
 
-const WHIP_TRANSITIONS = [
-  'slideleft',
-  'smoothright',
-  'wipeleft',
-  'slideright',
-  'smoothleft',
-  'circleopen',
-  'hblur',
-];
-
-function pickXfadeTransition(
-  style: TransitionStyle,
-  nextScene: SceneItem,
-  idx: number
-): string {
-  if (style !== 'whip-dynamic') return 'fade';
-  if (nextScene.sfxCue === 'flashwhoosh' || nextScene.sfxCue === 'impact') {
-    return 'fadewhite';
-  }
-  if (nextScene.beatKind === 'graphic-card') {
-    return idx % 2 === 0 ? 'slideup' : 'fadewhite';
-  }
-  return WHIP_TRANSITIONS[idx % WHIP_TRANSITIONS.length];
-}
-
 export async function renderProjectMp4(input: RenderProjectInput): Promise<string> {
   const startedAt = Date.now();
   const { width, height } = getTargetDimensions(input.aspectRatio);
   const fps = 30;
   const totalScenes = input.scenes.length;
 
-  const isTransitionActive =
-    (input.transitionStyle === 'whip-dynamic' || input.transitionStyle === 'crossfade') &&
-    totalScenes > 1;
-
-  // Frame-exact transition overlap so 30+ chained xfade nodes never drift out of sync!
-  const requestedFadeFrames =
-    input.transitionStyle === 'whip-dynamic'
-      ? 4 // ~133ms crisp whip-pan / flash
-      : Math.max(4, Math.min(14, Math.round(((input.transitionDurationMs || 280) / 1000) * fps)));
+  const isTransitionActive = input.transitionStyle !== 'cut' && totalScenes > 1;
 
   const sceneFrameCounts = input.scenes.map((scene) => {
     const startF = Math.round((scene.startMs * fps) / 1000);
@@ -224,12 +192,12 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
     return Math.max(8, endF - startF);
   });
 
-  const minSceneFrames = Math.min(...sceneFrameCounts);
-  const fadeFrames = isTransitionActive
-    ? Math.max(3, Math.min(requestedFadeFrames, Math.floor(minSceneFrames * 0.35)))
-    : 0;
-  const useXfade = isTransitionActive && fadeFrames >= 3;
-  const fadeSec = Number((fadeFrames / fps).toFixed(4));
+  const directorBoundaries = isTransitionActive
+    ? planDirectorTransitions(input.scenes, sceneFrameCounts, input.transitionStyle, input.transitionDurationMs, fps)
+    : [];
+  const useXfade = directorBoundaries.length === totalScenes - 1 && totalScenes > 1;
+  const snapCount = directorBoundaries.filter((x) => x.kind === 'snap').length;
+  const accentCount = directorBoundaries.length - snapCount;
 
   const effectiveCaptionMode: CaptionMode =
     !input.subtitlesEnabled || input.captionMode === 'off'
@@ -239,6 +207,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
   const renderDir = path.join(input.projectDir, 'render_' + input.jobId);
   await fs.mkdir(renderDir, { recursive: true });
 
+  try {
   const outputPath = path.join(input.projectDir, `scenesync_${input.projectId}_${input.jobId}.mp4`);
   const segmentPaths: string[] = [];
   let activeEncoder = input.encoderId || 'libx264';
@@ -252,7 +221,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
       currentScene: 0,
       totalScenes,
       stage: 'Preparing scenes',
-      message: 'Initializing FFmpeg v5 render pipeline...',
+      message: 'Initializing FFmpeg render pipeline...',
       encoderUsed: activeEncoder,
       elapsedMs: Date.now() - startedAt,
       ...partial,
@@ -263,14 +232,14 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
     status: 'rendering',
     progress: 3,
     stage: 'Preparing rapid micro-beat pipeline',
-    message: `Target ${width}×${height} @ ${fps}fps · ${totalScenes} visual beats · ${useXfade ? `${input.transitionStyle} (${Math.round(fadeSec * 1000)}ms)` : 'Hard snap cuts'}`,
+    message: `Target ${width}×${height} @ ${fps}fps · ${totalScenes} visual beats · ${useXfade ? `${snapCount} snap cuts + ${accentCount} accent transitions` : 'Hard cuts'}`,
   });
 
   // 1. Render every micro-beat segment (Media, Focal Crop-Cut, or $0 Graphic Card)
   for (let i = 0; i < totalScenes; i++) {
     const scene = input.scenes[i];
     const baseFrames = sceneFrameCounts[i];
-    const extraFrames = useXfade && i < totalScenes - 1 ? fadeFrames : 0;
+    const extraFrames = useXfade ? (directorBoundaries[i]?.overlapFrames ?? 0) : 0;
     const totalSegFrames = baseFrames + extraFrames;
     const durationSec = (totalSegFrames / fps).toFixed(4);
 
@@ -516,9 +485,9 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
       for (let i = 1; i < segmentPaths.length; i++) {
         const offsetSec = (cumFrames / fps).toFixed(4);
         const outLabel = `vx${i}`;
-        const xfadeName = pickXfadeTransition(input.transitionStyle, input.scenes[i], i);
+        const boundary = directorBoundaries[i - 1];
         filterLines.push(
-          `[${currentLabel}][${i}:v]xfade=transition=${xfadeName}:duration=${fadeSec.toFixed(4)}:offset=${offsetSec}[${outLabel}]`
+          `[${currentLabel}][${i}:v]xfade=transition=${boundary.transition}:duration=${(boundary.overlapFrames / fps).toFixed(6)}:offset=${offsetSec}[${outLabel}]`
         );
         currentLabel = outLabel;
         cumFrames += sceneFrameCounts[i];
@@ -612,10 +581,13 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
     }
 
     if (amixInputs.length === 1) {
-      filterLines.push('[vo_mix]anull[afinal]');
+      filterLines.push('[vo_mix]alimiter=limit=0.92[afinal]');
     } else {
       filterLines.push(
-        `${amixInputs.join('')}amix=inputs=${amixInputs.length}:duration=first:dropout_transition=2:normalize=0[afinal]`
+        `${amixInputs.join('')}amix=inputs=${amixInputs.length}:duration=first:dropout_transition=2:normalize=0[amixed]`
+      );
+      filterLines.push(
+        '[amixed]alimiter=limit=0.92[afinal]'
       );
     }
 
@@ -661,7 +633,6 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
     }
   }
 
-  await fs.rm(renderDir, { recursive: true, force: true }).catch(() => {});
   const stat = await fs.stat(outputPath);
 
   emit({
@@ -675,4 +646,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
   });
 
   return outputPath;
+  } finally {
+    await fs.rm(renderDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
