@@ -41,7 +41,7 @@ import {
   generateStoryBlueprint,
 } from '../services/blueprintGenerator.ts';
 import { probeEncoders } from '../services/encoderProbe.ts';
-import { isGeminiConfigured } from '../services/geminiClient.ts';
+import { getGeminiClient, getGeminiVisionModel, isGeminiConfigured } from '../services/geminiClient.ts';
 import { getOllamaVisionStatus } from '../services/ollamaVision.ts';
 import { processUploadedMedia } from '../services/imageProcessor.ts';
 import {
@@ -472,6 +472,40 @@ export function createStudioRouter(): express.Router {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to inspect capabilities';
       res.status(500).json({ error: message });
+    }
+  });
+
+  // Test the configured server-side key without returning or logging the secret.
+  // This is intentionally user-triggered, to avoid billable API calls on page load.
+  router.post('/gemini/check', async (_req, res) => {
+    const client = getGeminiClient();
+    if (!client) {
+      res.status(400).json({
+        ok: false,
+        message: 'No Gemini API key is configured on the SceneSync server. Add a newly rotated key to your local .env file and restart SceneSync.',
+      });
+      return;
+    }
+
+    const model = getGeminiVisionModel();
+    try {
+      await client.models.generateContent({
+        model,
+        contents: 'Reply with OK.',
+        config: { maxOutputTokens: 16 },
+      });
+      res.json({ ok: true, model, message: 'Gemini connection verified. Auto Vision can use the configured server-side key.' });
+    } catch (err: unknown) {
+      // Never relay raw provider errors, which can sometimes include sensitive URLs.
+      const reason = err instanceof Error ? err.message : '';
+      const message = /api.key|api_key|invalid.key|unauthori[sz]ed|401|403/i.test(reason)
+        ? 'Gemini rejected this API key. Rotate it in Google AI Studio and update your local .env.'
+        : /quota|rate.limit|429|resource.exhausted/i.test(reason)
+          ? 'Gemini quota or rate limit reached for this key. Review your Google AI Studio usage.'
+          : /not.found|404|model/i.test(reason)
+            ? 'Gemini could not access the selected vision model. Check GEMINI_VISION_MODEL and your project model access.'
+            : 'Could not verify Gemini. Check connectivity, your API key, and model access.';
+      res.status(502).json({ ok: false, model, message });
     }
   });
 
