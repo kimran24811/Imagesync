@@ -210,10 +210,12 @@ export function computeTargetBeatCount(
   if (pacingMode === 'upload-match') {
     return Math.max(1, Math.min(mediaCount, maxSafeBeats));
   }
-  const msPerBeat = pacingMode === 'rapid-reel' ? 1350 : 1950;
+  // A 60-second Reel should choose the BEST ~55 shots from 110 uploads,
+  // not force 110 meaningless half-second cuts just because media exists.
+  const msPerBeat = pacingMode === 'rapid-reel' ? 1100 : 1950;
   const maxBeats = pacingMode === 'rapid-reel' ? 72 : 55;
   const cadenceTarget = Math.max(4, Math.round(audioDurationMs / msPerBeat));
-  return Math.max(1, Math.min(maxSafeBeats, Math.max(mediaCount, Math.min(maxBeats, cadenceTarget))));
+  return Math.max(1, Math.min(maxSafeBeats, maxBeats, cadenceTarget));
 }
 
 export async function alignScriptAndImages(
