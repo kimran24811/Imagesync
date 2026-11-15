@@ -17,7 +17,7 @@ import type {
   TransitionStyle,
 } from '../../src/types/studio.ts';
 import { renderGraphicCardSegmentMp4 } from './cardRenderer.ts';
-import { spawnStreamCommand } from './execUtils.ts';
+import { runCommand, spawnStreamCommand } from './execUtils.ts';
 import {
   buildSfxSchedule,
   ensureSfxBank,
@@ -174,6 +174,21 @@ function buildEncoderArgs(encoderId: string): string[] {
     default:
       return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p'];
   }
+}
+
+async function probeOutputVideoDurationMs(filePath: string): Promise<number> {
+  const result = await runCommand('ffprobe', [
+    '-v', 'error',
+    '-select_streams', 'v:0',
+    '-show_entries', 'stream=duration',
+    '-of', 'default=noprint_wrappers=1:nokey=1',
+    filePath,
+  ], 15000);
+  const seconds = Number(result.stdout.trim().split(/\s+/)[0]);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error('Rendered MP4 has no usable video track; cannot declare export complete.');
+  }
+  return Math.round(seconds * 1000);
 }
 
 function escapeFilterPath(filePath: string): string {
@@ -452,6 +467,7 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
       outputPath,
     ]);
   } else {
+    const renderMaster = async (withTransitions: boolean): Promise<void> => {
     const masterArgs: string[] = ['-hide_banner', '-loglevel', 'error', '-y'];
     const filterLines: string[] = [];
 
@@ -479,28 +495,42 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
       }
     }
 
-    // Video filtergraph with exact frame-locked xfade chain
-    let videoOutLabel = '0:v';
-    if (useXfade && segmentPaths.length > 1) {
-      let currentLabel = '0:v';
+    // Normalize EVERY input to the planned number of 30fps frames.
+    // Some image/SVG/B-roll segments have fewer frames or irregular PTS.
+    // Without this, an xfade chain can silently end after the first few beats
+    // and FFmpeg may still exit 0 while the voiceover continues to play.
+    const normalizedLabels: string[] = [];
+    for (let i = 0; i < segmentPaths.length; i++) {
+      const framesNeeded = sceneFrameCounts[i] +
+        (withTransitions ? (directorBoundaries[i]?.overlapFrames ?? 0) : 0);
+      const label = `vsrc_${i}`;
+      filterLines.push(
+        `[${i}:v]fps=${fps},tpad=stop_mode=clone:stop=${framesNeeded},trim=end_frame=${framesNeeded},setpts=N/(${fps}*TB),fps=${fps},format=yuv420p[${label}]`
+      );
+      normalizedLabels.push(label);
+    }
+
+    let videoOutLabel = normalizedLabels[0];
+    if (withTransitions && segmentPaths.length > 1) {
+      let currentLabel = normalizedLabels[0];
       let cumFrames = sceneFrameCounts[0];
       for (let i = 1; i < segmentPaths.length; i++) {
         const offsetSec = (cumFrames / fps).toFixed(4);
         const outLabel = `vx${i}`;
         const boundary = directorBoundaries[i - 1];
         filterLines.push(
-          `[${currentLabel}][${i}:v]xfade=transition=${boundary.transition}:duration=${(boundary.overlapFrames / fps).toFixed(6)}:offset=${offsetSec}[${outLabel}]`
+          `[${currentLabel}][${normalizedLabels[i]}]xfade=transition=${boundary.transition}:duration=${(boundary.overlapFrames / fps).toFixed(6)}:offset=${offsetSec}[${outLabel}]`
         );
         currentLabel = outLabel;
         cumFrames += sceneFrameCounts[i];
       }
       videoOutLabel = currentLabel;
     } else if (segmentPaths.length > 1) {
-      const concatInputs = segmentPaths.map((_, idx) => `[${idx}:v]`).join('');
+      const concatInputs = normalizedLabels.map((label) => `[${label}]`).join('');
       filterLines.push(`${concatInputs}concat=n=${segmentPaths.length}:v=1:a=0[vconcat]`);
       videoOutLabel = 'vconcat';
     } else {
-      filterLines.push('[0:v]null[vsingle]');
+      filterLines.push(`[${normalizedLabels[0]}]null[vsingle]`);
       videoOutLabel = 'vsingle';
     }
 
@@ -656,8 +686,38 @@ export async function renderProjectMp4(input: RenderProjectInput): Promise<strin
         throw err;
       }
     }
+    };
+
+    // A successful FFmpeg exit is not sufficient: reject short video streams.
+    // Prefer a complete hard-cut render to a 53s audio track with only 6s
+    // of pictures. Keep captions, music and the same SFX during recovery.
+    try {
+      await renderMaster(useXfade);
+      const initialVideoMs = await probeOutputVideoDurationMs(outputPath);
+      if (initialVideoMs + 750 < input.audioDurationMs) {
+        throw new Error(
+          `Visual track ended at ${(initialVideoMs / 1000).toFixed(2)}s before ${(input.audioDurationMs / 1000).toFixed(2)}s voiceover.`
+        );
+      }
+    } catch (err) {
+      if (!useXfade) throw err;
+      emit({
+        status: 'muxing',
+        progress: 92,
+        stage: 'Repairing visual timeline',
+        message: 'Transition render was incomplete or failed; rebuilding all beats with reliable hard cuts, captions and SFX...',
+      });
+      await fs.rm(outputPath, { force: true }).catch(() => {});
+      await renderMaster(false);
+    }
   }
 
+  const finalVideoMs = await probeOutputVideoDurationMs(outputPath);
+  if (finalVideoMs + 750 < input.audioDurationMs) {
+    throw new Error(
+      `Incomplete video: ${(finalVideoMs / 1000).toFixed(2)}s of visuals for ${(input.audioDurationMs / 1000).toFixed(2)}s of audio. Export was rejected, not marked complete.`
+    );
+  }
   const stat = await fs.stat(outputPath);
 
   emit({
