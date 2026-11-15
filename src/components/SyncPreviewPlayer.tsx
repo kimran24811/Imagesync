@@ -180,9 +180,11 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
   // Web Audio procedural SFX buffers for zero-latency preview parity
   const audioCtxRef = useRef<AudioContext | null>(null);
   const sfxBuffersRef = useRef<Partial<Record<ActiveSfxCue, AudioBuffer>>>({});
-  const lastFiredCueRef = useRef<string>('');
+  const firedCueIdsRef = useRef<Set<string>>(new Set());
+  const lastSfxTimeRef = useRef(-1);
 
   const [isMuted, setIsMuted] = useState(false);
+  useEffect(() => () => { void audioCtxRef.current?.close().catch(() => {}); }, []);
   const [imgErrorId, setImgErrorId] = useState<string | null>(null);
 
   const imagesById = useMemo(
@@ -268,14 +270,20 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
         const nowMs = Math.min(session.audio.durationMs, audioEl.currentTime * 1000);
         onTimeUpdate(nowMs);
 
+        const previousMs = lastSfxTimeRef.current;
+        // Sweep between frames: a dropped animation frame must not drop sound design.
+        if (nowMs < previousMs - 100) {
+          firedCueIdsRef.current.clear();
+        }
         for (const ev of scheduledSfxEvents) {
-          if (nowMs >= ev.atMs && nowMs <= ev.atMs + 70) {
-            if (lastFiredCueRef.current !== ev.id) {
-              lastFiredCueRef.current = ev.id;
+          if (ev.atMs > Math.min(previousMs, nowMs - 1) && ev.atMs <= nowMs && nowMs - ev.atMs < 220) {
+            if (!firedCueIdsRef.current.has(ev.id)) {
+              firedCueIdsRef.current.add(ev.id);
               triggerSfxCue(ev.cue);
             }
           }
         }
+        lastSfxTimeRef.current = nowMs;
 
         const musicEl = musicRef.current;
         if (musicEl && session.backgroundMusic) {
@@ -329,7 +337,8 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
       if (audioEl.currentTime * 1000 >= session.audio.durationMs - 40) {
         audioEl.currentTime = 0;
         if (musicEl) musicEl.currentTime = 0;
-        lastFiredCueRef.current = '';
+        firedCueIdsRef.current.clear();
+        lastSfxTimeRef.current = -1;
         onTimeUpdate(0);
       }
       try {
@@ -351,7 +360,8 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
 
   const seekToMs = (ms: number) => {
     const clamped = Math.max(0, Math.min(session.audio.durationMs, ms));
-    lastFiredCueRef.current = '';
+    firedCueIdsRef.current.clear();
+    lastSfxTimeRef.current = clamped - 1;
     if (audioRef.current) {
       audioRef.current.currentTime = clamped / 1000;
     }
@@ -730,7 +740,7 @@ export const SyncPreviewPlayer: React.FC<SyncPreviewPlayerProps> = ({
             <span>
               {voiceLockedCount > 0
                 ? 'Gemini Acoustic + Vision Locked'
-                : session.matchingEngineUsed === 'gemini-4-hydrogen'
+                : session.matchingEngineUsed === 'gemini' || session.matchingEngineUsed === 'gemini-vision'
                   ? 'Gemini Vision Matched'
                   : 'Rapid Concept-Paced'}
             </span>

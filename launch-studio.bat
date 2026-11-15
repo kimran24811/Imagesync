@@ -35,6 +35,18 @@ if not exist "node_modules" (
   )
 )
 
+rem New builds add a PNG renderer required by FFmpeg 9 (which lacks SVG decoding).
+rem Ensure existing installations update dependencies instead of keeping old node_modules.
+if not exist "node_modules\@resvg\resvg-js\package.json" (
+  echo [SETUP] Installing updated graphic card PNG renderer...
+  call npm install
+  if %errorlevel% neq 0 (
+    echo [ERROR] Could not install the graphic card renderer dependency.
+    pause
+    exit /b 1
+  )
+)
+
 if not exist ".env" (
   if exist ".env.example" (
     copy /Y ".env.example" ".env" >nul

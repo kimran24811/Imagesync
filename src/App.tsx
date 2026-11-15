@@ -243,6 +243,23 @@ export default function App() {
       return;
     }
 
+    // Avoid uploading 110 photos before discovering there is no actual
+    // image-understanding model. No automatic sync can work from filenames alone.
+    if (matchingPreference !== 'local' && capabilities) {
+      if (matchingPreference === 'gemini' && !capabilities.geminiConfigured) {
+        setErrorMessage('Gemini Vision is not configured. Add GEMINI_API_KEY, or install Ollama and select Auto Vision.');
+        return;
+      }
+      if (matchingPreference === 'ollama' && !capabilities.ollamaVisionAvailable) {
+        setErrorMessage(capabilities.ollamaVisionHelp || 'Ollama image model is not ready. Run: ollama pull gemma3:4b');
+        return;
+      }
+      if (matchingPreference === 'auto' && !capabilities.geminiConfigured && !capabilities.ollamaVisionAvailable) {
+        setErrorMessage('Auto Vision needs a visual AI engine. Install Ollama from https://ollama.com, run: ollama pull gemma3:4b, and reload SceneSync. Or configure GEMINI_API_KEY. You do NOT need to rename pictures.');
+        return;
+      }
+    }
+
     setErrorMessage(null);
     setIsAnalyzing(true);
     setAnalyzePhase('Initializing upload...');

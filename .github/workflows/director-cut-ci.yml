@@ -1,0 +1,44 @@
+name: Director Cut checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - feature/director-cut-engine-v1
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: TypeScript checks
+        run: npm run lint
+      - name: Director Cut tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+
+  windows-svg-card-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Windows-native SVG-to-PNG renderer
+        run: npm install --no-audit --no-fund
+      - name: Install matching FFmpeg 9.0.2 essentials build
+        run: choco install ffmpeg --version=9.0.2 -y --no-progress
+      - name: Verify PNG rendering and FFmpeg input on Windows
+        run: npx tsx --test tests/graphicCardRender.test.ts

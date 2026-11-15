@@ -73,6 +73,11 @@ export function computeSfxSchedule(
 
     if (cue === 'none') continue;
 
+    // A deep hook impact beneath the first visual cue adds energy without changing the VO.
+    if (i === 0 && config.includeHookImpact && cue !== 'impact' && cue !== 'thud') {
+      events.push({ id: `${scene.id}_hook_layer`, cue: 'impact', atMs: 0 });
+    }
+
     // 1. Primary Beat Entry Cue
     if (cue === 'impact' || cue === 'thud') {
       if (i === 0 ? config.includeHookImpact : true) {
@@ -139,7 +144,7 @@ export function computeSfxSchedule(
     }
 
     // 3. Dense Micro-Beat Sub-Ticks & Payoff Chimes inside scenes (typing, stat rolls, word bursts)
-    if (config.includeMicroBeatTicks && scene.durationMs >= 1450) {
+    if (config.includeMicroBeatTicks && scene.durationMs >= (scene.beatKind === 'graphic-card' ? 950 : 1450)) {
       const midAt = Math.round(scene.startMs + scene.durationMs * 0.48);
       if (midAt < maxAtMs - 110) {
         let midCue: ActiveSfxCue = 'typeclick';
@@ -157,15 +162,23 @@ export function computeSfxSchedule(
     }
   }
 
-  // Sort chronologically and keep rapid rhythm clean with tight 70ms guard
+  // Layer a deep hit with a detail accent, never an uncontrolled pile-up.
   const sorted = events.sort((a, b) => a.atMs - b.atMs);
   const filtered: ScheduledSfxEvent[] = [];
+  const lastCueAt = new Map<ActiveSfxCue, number>();
+  const lastLaneAt = new Map<string, number>();
   for (const ev of sorted) {
-    const prev = filtered[filtered.length - 1];
-    if (!prev || ev.atMs - prev.atMs >= 70 || ev.cue === 'impact') {
-      filtered.push(ev);
-    }
+    const lane = ev.cue === 'impact' || ev.cue === 'thud' ? 'impact'
+      : ev.cue === 'whoosh' || ev.cue === 'flashwhoosh' || ev.cue === 'shutter'
+        ? 'transition' : 'detail';
+    if (ev.atMs - (lastCueAt.get(ev.cue) ?? -Infinity) < 125) continue;
+    if (ev.atMs - (lastLaneAt.get(lane) ?? -Infinity) < 60) continue;
+    if (filtered.filter((other) => Math.abs(other.atMs - ev.atMs) < 65).length >= 2) continue;
+    if (filtered.filter((other) => ev.atMs - other.atMs < 1000).length >= 9) continue;
+    filtered.push(ev);
+    lastCueAt.set(ev.cue, ev.atMs);
+    lastLaneAt.set(lane, ev.atMs);
+    if (filtered.length >= 160) break;
   }
-
-  return filtered.slice(0, 160);
+  return filtered;
 }

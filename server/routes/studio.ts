@@ -41,7 +41,8 @@ import {
   generateStoryBlueprint,
 } from '../services/blueprintGenerator.ts';
 import { probeEncoders } from '../services/encoderProbe.ts';
-import { isGeminiConfigured } from '../services/geminiClient.ts';
+import { getGeminiClient, getGeminiVisionModel, isGeminiConfigured } from '../services/geminiClient.ts';
+import { getOllamaVisionStatus } from '../services/ollamaVision.ts';
 import { processUploadedMedia } from '../services/imageProcessor.ts';
 import {
   copySampleImagesToDir,
@@ -229,7 +230,7 @@ function sanitizeMotionIntensity(val: unknown): MotionIntensity {
 }
 
 function sanitizeMatchingPreference(val: unknown): MatchingPreference {
-  if (val === 'gemini' || val === 'local') return val;
+  if (val === 'gemini' || val === 'ollama' || val === 'local') return val;
   return 'auto';
 }
 
@@ -458,16 +459,53 @@ export function createStudioRouter(): express.Router {
   // 1. Probe system capabilities
   router.get('/capabilities', async (_req, res) => {
     try {
-      const encoderInfo = await probeEncoders();
+      const [encoderInfo, ollama] = await Promise.all([probeEncoders(), getOllamaVisionStatus()]);
       res.json({
         ffmpegVersion: encoderInfo.ffmpegVersion,
         geminiConfigured: isGeminiConfigured(),
+        ollamaVisionAvailable: ollama.available,
+        ollamaVisionModel: ollama.model,
+        ollamaVisionHelp: ollama.reason,
         availableEncoders: encoderInfo.availableEncoders,
         recommendedEncoder: encoderInfo.recommendedEncoder,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to inspect capabilities';
       res.status(500).json({ error: message });
+    }
+  });
+
+  // Test the configured server-side key without returning or logging the secret.
+  // This is intentionally user-triggered, to avoid billable API calls on page load.
+  router.post('/gemini/check', async (_req, res) => {
+    const client = getGeminiClient();
+    if (!client) {
+      res.status(400).json({
+        ok: false,
+        message: 'No Gemini API key is configured on the SceneSync server. Add a newly rotated key to your local .env file and restart SceneSync.',
+      });
+      return;
+    }
+
+    const model = getGeminiVisionModel();
+    try {
+      await client.models.generateContent({
+        model,
+        contents: 'Reply with OK.',
+        config: { maxOutputTokens: 16 },
+      });
+      res.json({ ok: true, model, message: 'Gemini connection verified. Auto Vision can use the configured server-side key.' });
+    } catch (err: unknown) {
+      // Never relay raw provider errors, which can sometimes include sensitive URLs.
+      const reason = err instanceof Error ? err.message : '';
+      const message = /api.key|api_key|invalid.key|unauthori[sz]ed|401|403/i.test(reason)
+        ? 'Gemini rejected this API key. Rotate it in Google AI Studio and update your local .env.'
+        : /quota|rate.limit|429|resource.exhausted/i.test(reason)
+          ? 'Gemini quota or rate limit reached for this key. Review your Google AI Studio usage.'
+          : /not.found|404|model/i.test(reason)
+            ? 'Gemini could not access the selected vision model. Check GEMINI_VISION_MODEL and your project model access.'
+            : 'Could not verify Gemini. Check connectivity, your API key, and model access.';
+      res.status(502).json({ ok: false, model, message });
     }
   });
 
@@ -723,6 +761,11 @@ export function createStudioRouter(): express.Router {
           pauses: audioAnalysis.pauses,
           images: processedMedia,
           matchingPreference,
+          visionCacheDir: path.join(WORKSPACE_ROOT, '_vision_cache'),
+          onVisualProgress: (completed, total) => {
+            jobState.progress = Math.round(72 + (completed / Math.max(1, total)) * 18);
+            jobState.message = `AI inspecting picture ${completed} of ${total} and matching to narration...`;
+          },
           pacingMode,
           graphicCardTheme,
         });
@@ -1082,6 +1125,12 @@ export function createStudioRouter(): express.Router {
       const graphicCardTheme = sanitizeGraphicCardTheme(req.body?.graphicCardTheme);
       const motionIntensity = sanitizeMotionIntensity(req.body?.motionIntensity);
       const matchingPreference = sanitizeMatchingPreference(req.body?.matchingPreference);
+      // Built-in sample is a non-vision demo. Keep it usable when the PC has
+      // no model, without silently mislabeling a REAL user's automatic sync.
+      const sampleVision = await getOllamaVisionStatus();
+      const sampleMatchingPreference = matchingPreference === 'auto' &&
+        !isGeminiConfigured() && !sampleVision.available
+          ? 'local' : matchingPreference;
       const transitionStyle = sanitizeTransitionStyle(req.body?.transitionStyle);
       const captionMode = sanitizeCaptionMode(
         req.body?.captionMode,
@@ -1170,7 +1219,7 @@ export function createStudioRouter(): express.Router {
         audioProxyPath,
         pauses: audioAnalysis.pauses,
         images: processedMedia,
-        matchingPreference,
+        matchingPreference: sampleMatchingPreference,
         pacingMode,
         graphicCardTheme,
       });

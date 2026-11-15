@@ -41,7 +41,7 @@ export interface GraphicCardData {
 
 export type CaptionZone = 'top-banner' | 'center-impact' | 'lower-hero';
 
-export type MatchingPreference = 'auto' | 'gemini' | 'local';
+export type MatchingPreference = 'auto' | 'gemini' | 'ollama' | 'local';
 
 export type TransitionStyle = 'whip-dynamic' | 'crossfade' | 'cut';
 
@@ -124,7 +124,7 @@ export interface StoryBlueprint {
   continuityPrefix: string;
   fullScript: string;
   scenes: BlueprintScene[];
-  engineUsed: 'gemini-4-hydrogen' | 'local-template';
+  engineUsed: 'gemini' | 'local-template';
   fallbackNotice?: string;
 }
 
@@ -203,6 +203,9 @@ export interface EncoderOption {
 export interface StudioCapabilities {
   ffmpegVersion: string;
   geminiConfigured: boolean;
+  ollamaVisionAvailable?: boolean;
+  ollamaVisionModel?: string;
+  ollamaVisionHelp?: string;
   availableEncoders: EncoderOption[];
   recommendedEncoder: EncoderOption;
 }
@@ -222,7 +225,7 @@ export interface ProjectSession {
   accentColor: AccentColorId;
   brandKicker: string;
   sfxConfig: SfxConfig;
-  matchingEngineUsed: 'gemini-4-hydrogen' | 'local-heuristic';
+  matchingEngineUsed: 'gemini' | 'gemini-vision' | 'ollama-vision' | 'local-heuristic';
   fallbackNotice?: string;
   audio: UploadedAudio;
   backgroundMusic?: BackgroundMusicTrack;

@@ -8,6 +8,7 @@ import type {
 } from '../../src/types/studio.ts';
 import { ACCENT_COLOR_HEX } from '../../src/utils/captions.ts';
 import { spawnStreamCommand } from './execUtils.ts';
+import { Resvg } from '@resvg/resvg-js';
 
 function escapeXml(raw: string): string {
   return raw
@@ -278,8 +279,21 @@ function buildGraphicCardSvg(
 
 /**
  * Generates an animated 1080p MP4 segment for a $0 Graphic Card beat.
- * For 'stat-counter', renders stepped rollup SVG frames via FFmpeg librsvg so numbers visibly animate up!
+ * Every card is rasterized to PNG in Node before FFmpeg: Windows FFmpeg 9
+ * essentials builds do not provide SVG input decoding. No external decoder is required.
  */
+/**
+ * Rasterize our own trusted SVG markup using a cross-platform Node renderer.
+ * FFmpeg only receives ordinary PNG input, including for stepped counter cards.
+ */
+export async function rasterizeGraphicCardSvg(svg: string, pngPath: string): Promise<void> {
+  const png = new Resvg(svg, {
+    fitTo: { mode: 'original' },
+    font: { loadSystemFonts: true },
+  }).render().asPng();
+  await fs.writeFile(pngPath, png);
+}
+
 export async function renderGraphicCardSegmentMp4(params: {
   scene: SceneItem;
   aspectRatio: AspectRatio;
@@ -304,7 +318,7 @@ export async function renderGraphicCardSegmentMp4(params: {
   const upH = Math.round(height * 1.16);
 
   if (card.cardType === 'stat-counter' && params.frames >= 18) {
-    // Render 5 progressive counter steps + final hold with subtle zoompunch settle
+    // Render 5 progressive PNG counter steps + final hold with subtle zoompunch settle
     const steps = [0.18, 0.45, 0.72, 0.91, 1.0];
     const stepListPath = path.join(params.renderDir, `card_${params.scene.index}_steps.txt`);
     const concatEntries: string[] = [];
@@ -314,21 +328,20 @@ export async function renderGraphicCardSegmentMp4(params: {
     let usedFrames = 0;
 
     for (let s = 0; s < steps.length; s++) {
-      const svgPath = path.join(params.renderDir, `card_${params.scene.index}_s${s}.svg`);
-      await fs.writeFile(
-        svgPath,
+      const pngPath = path.join(params.renderDir, `card_${params.scene.index}_s${s}.png`);
+      await rasterizeGraphicCardSvg(
         buildGraphicCardSvg(card, width, height, params.accentColor, steps[s]),
-        'utf8'
+        pngPath
       );
       const stepFrames =
         s === steps.length - 1 ? Math.max(2, params.frames - usedFrames) : perStepFrames;
       usedFrames += stepFrames;
-      const safePath = svgPath.replace(/\\/g, '/').replace(/'/g, "'\\''");
+      const safePath = pngPath.replace(/\\/g, '/').replace(/'/g, "'\\''");
       concatEntries.push(`file '${safePath}'`);
       concatEntries.push(`duration ${(stepFrames / fps).toFixed(4)}`);
     }
-    const lastSvg = path.join(params.renderDir, `card_${params.scene.index}_s${steps.length - 1}.svg`);
-    concatEntries.push(`file '${lastSvg.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`);
+    const lastPng = path.join(params.renderDir, `card_${params.scene.index}_s${steps.length - 1}.png`);
+    concatEntries.push(`file '${lastPng.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`);
     await fs.writeFile(stepListPath, concatEntries.join('\n'), 'utf8');
 
     const denom = Math.max(1, params.frames - 1);
@@ -361,11 +374,10 @@ export async function renderGraphicCardSegmentMp4(params: {
   }
 
   // Statement & split-contrast card with crisp snap-settle punch zoom
-  const svgPath = path.join(params.renderDir, `card_${params.scene.index}.svg`);
-  await fs.writeFile(
-    svgPath,
+  const pngPath = path.join(params.renderDir, `card_${params.scene.index}.png`);
+  await rasterizeGraphicCardSvg(
     buildGraphicCardSvg(card, width, height, params.accentColor, 1),
-    'utf8'
+    pngPath
   );
   const denom = Math.max(1, params.frames - 1);
 
@@ -375,7 +387,7 @@ export async function renderGraphicCardSegmentMp4(params: {
     'error',
     '-y',
     '-i',
-    svgPath,
+    pngPath,
     '-vf',
     `scale=${upW}:${upH},zoompan=z='1.02+0.12*exp(-on/3.2)+0.04*on/${denom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${params.frames}:s=${width}x${height}:fps=${fps},format=yuv420p`,
     '-frames:v',

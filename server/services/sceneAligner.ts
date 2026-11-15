@@ -20,7 +20,11 @@ import {
   ALL_ACTIVE_SFX_CUES,
   inferDefaultSfxCue,
 } from '../../src/utils/sfxSchedule.ts';
-import { getGeminiClient, isGeminiConfigured } from './geminiClient.ts';
+import { getGeminiBlueprintModel, getGeminiClient, isGeminiConfigured } from './geminiClient.ts';
+import { orderMediaByShotNumber, selectMediaForBeat } from '../../src/utils/orderedMedia.ts';
+import { matchCaptionsToScriptBeats } from '../../src/utils/semanticMatching.ts';
+import { captionAllMedia, getOllamaVisionStatus } from './ollamaVision.ts';
+import { captionAllMediaWithGemini } from './geminiVisionCaptions.ts';
 
 export interface InternalMediaPayload {
   id: string;
@@ -41,12 +45,14 @@ interface AlignScenesInput {
   matchingPreference: MatchingPreference;
   pacingMode?: PacingMode;
   graphicCardTheme?: GraphicCardTheme;
+  visionCacheDir?: string;
+  onVisualProgress?: (completed: number, total: number) => void;
 }
 
 interface AlignScenesOutput {
   scenes: SceneItem[];
   imageSummaries: Record<string, string>;
-  engineUsed: 'gemini-4-hydrogen' | 'local-heuristic';
+  engineUsed: 'gemini' | 'gemini-vision' | 'ollama-vision' | 'local-heuristic';
   fallbackNotice?: string;
 }
 
@@ -199,13 +205,17 @@ export function computeTargetBeatCount(
   mediaCount: number,
   pacingMode: PacingMode
 ): number {
+  // Guard against more cuts than the soundtrack can support (minimum 480ms/beat).
+  const maxSafeBeats = Math.max(1, Math.floor(audioDurationMs / 480));
   if (pacingMode === 'upload-match') {
-    return Math.max(1, mediaCount);
+    return Math.max(1, Math.min(mediaCount, maxSafeBeats));
   }
-  const msPerBeat = pacingMode === 'rapid-reel' ? 1350 : 1950;
+  // A 60-second Reel should choose the BEST ~55 shots from 110 uploads,
+  // not force 110 meaningless half-second cuts just because media exists.
+  const msPerBeat = pacingMode === 'rapid-reel' ? 1100 : 1950;
   const maxBeats = pacingMode === 'rapid-reel' ? 72 : 55;
   const cadenceTarget = Math.max(4, Math.round(audioDurationMs / msPerBeat));
-  return Math.max(mediaCount, Math.min(maxBeats, cadenceTarget));
+  return Math.max(1, Math.min(maxSafeBeats, maxBeats, cadenceTarget));
 }
 
 export async function alignScriptAndImages(
@@ -227,63 +237,50 @@ export async function alignScriptAndImages(
     pacingMode
   );
 
-  const wantsGemini = input.matchingPreference !== 'local';
-  const client = wantsGemini ? getGeminiClient() : null;
-
-  if (wantsGemini && client) {
-    try {
-      const geminiResult = await alignWithGeminiMultimodal(
-        client,
-        cleanScript,
-        input.audioDurationMs,
-        input.audioProxyPath,
-        input.pauses,
-        input.images,
-        targetBeatCount,
-        pacingMode,
-        cardTheme
-      );
-      return geminiResult;
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Gemini multimodal request failed';
-      if (input.matchingPreference === 'gemini') {
-        throw new Error(`Gemini alignment failed: ${msg}`);
-      }
-      const fallback = alignWithLocalHeuristic(
-        cleanScript,
-        input.audioDurationMs,
-        input.pauses,
-        input.images,
-        targetBeatCount,
-        pacingMode,
-        cardTheme
-      );
-      return {
-        ...fallback,
-        fallbackNotice: `Used local rapid-beat matching (${msg.slice(0, 140)}).`,
-      };
-    }
-  }
-
-  const fallback = alignWithLocalHeuristic(
-    cleanScript,
-    input.audioDurationMs,
-    input.pauses,
-    input.images,
-    targetBeatCount,
-    pacingMode,
-    cardTheme
-  );
-
-  if (wantsGemini && !isGeminiConfigured()) {
+  if (input.matchingPreference === 'local') {
     return {
-      ...fallback,
-      fallbackNotice:
-        'GEMINI_API_KEY is not configured in the environment; running deterministic rapid-beat visual & cadence matching.',
+      ...alignWithLocalHeuristic(cleanScript, input.audioDurationMs, input.pauses, input.images, targetBeatCount, pacingMode, cardTheme),
+      fallbackNotice: 'Manual file-order mode selected. SceneSync did not inspect image contents; switch to Auto Vision to match unlabeled pictures automatically.',
     };
   }
 
-  return fallback;
+  const client = getGeminiClient();
+  const useGemini = async (): Promise<AlignScenesOutput> => {
+    if (!client) throw new Error('Gemini Vision requires GEMINI_API_KEY in .env.');
+    const summaries = await captionAllMediaWithGemini(
+      input.images, input.visionCacheDir || 'workspace_data/_vision_cache', input.onVisualProgress
+    );
+    return alignWithVisualCaptions(cleanScript, input.audioDurationMs, input.pauses, input.images, targetBeatCount, pacingMode, cardTheme, summaries, 'gemini-vision');
+  };
+  const useOllama = async (): Promise<AlignScenesOutput> => {
+    const summaries = await captionAllMedia(
+      input.images, input.visionCacheDir || 'workspace_data/_vision_cache', input.onVisualProgress
+    );
+    return alignWithVisualCaptions(cleanScript, input.audioDurationMs, input.pauses, input.images, targetBeatCount, pacingMode, cardTheme, summaries, 'ollama-vision');
+  };
+
+  if (input.matchingPreference === 'gemini') return useGemini();
+  if (input.matchingPreference === 'ollama') return useOllama();
+
+  // AUTO must never silently generate a random/filename-based edit when no
+  // image model can actually inspect the user's 110 unnumbered pictures.
+  const ollama = await getOllamaVisionStatus();
+  if (client) {
+    try {
+      return await useGemini();
+    } catch (error) {
+      if (ollama.available) return useOllama();
+      throw new Error(`Gemini visual matching failed: ${error instanceof Error ? error.message : String(error)}. ${ollama.reason || ''}`);
+    }
+  }
+  if (ollama.available) return useOllama();
+
+  throw new Error(
+    'Automatic picture-to-narration matching needs an image-understanding engine. ' +
+    'No Gemini API key or local Ollama vision model is ready. ' +
+    (ollama.reason || 'Install Ollama and pull a vision model.') +
+    ' Your filenames do NOT need to be numbered. For a non-AI montage, select Manual file-order mode explicitly.'
+  );
 }
 
 /**
@@ -306,9 +303,10 @@ function diversifyConsecutiveBeats(
     'bottom-detail',
   ];
   let cropCursor = 0;
+  let previousFinal: typeof drafts[number] | null = null;
 
   return drafts.map((draft, idx) => {
-    const prev = idx > 0 ? drafts[idx - 1] : null;
+    const prev = previousFinal;
     let beatKind: BeatKind = draft.beatKind ?? 'media';
     let focalCrop: FocalCropRegion = draft.focalCrop ?? 'full';
     let graphicCard = draft.graphicCard;
@@ -382,7 +380,7 @@ function diversifyConsecutiveBeats(
           ? 'shutter'
           : draft.sfxCue;
 
-    return {
+    const finalized = {
       ...draft,
       beatKind,
       focalCrop,
@@ -390,6 +388,8 @@ function diversifyConsecutiveBeats(
       kenBurnsDirection,
       sfxCue,
     };
+    previousFinal = finalized;
+    return finalized;
   });
 }
 
@@ -494,7 +494,7 @@ ${cleanScript}
   parts.push({ text: promptText });
 
   const response = await client.models.generateContent({
-    model: 'gemini-4-hydrogen',
+    model: getGeminiBlueprintModel(),
     contents: { parts },
     config: {
       systemInstruction:
@@ -647,7 +647,7 @@ ${cleanScript}
   return {
     scenes: timedScenes,
     imageSummaries,
-    engineUsed: 'gemini-4-hydrogen',
+    engineUsed: 'gemini',
   };
 }
 
@@ -862,6 +862,60 @@ export function smartTokenizeScript(rawScript: string, targetCount: number): str
   return clauses;
 }
 
+function alignWithVisualCaptions(
+  cleanScript: string,
+  audioDurationMs: number,
+  pauses: SpeechPause[],
+  images: InternalMediaPayload[],
+  targetBeatCount: number,
+  pacingMode: PacingMode,
+  cardTheme: GraphicCardTheme,
+  imageSummaries: Record<string, string>,
+  engineUsed: 'gemini-vision' | 'ollama-vision'
+): AlignScenesOutput {
+  const clauses = smartTokenizeScript(cleanScript, targetBeatCount);
+  const matches = matchCaptionsToScriptBeats(
+    clauses,
+    images.map((image) => ({
+      id: image.id,
+      description: imageSummaries[image.id] || '',
+    }))
+  );
+  const rawDrafts: SceneTimingDraft[] = clauses.map((clause, idx) => {
+    const match = matches[idx];
+    const words = clause.trim().split(/\s+/);
+    const emotionalWeight = /[!?]/.test(clause) ? 1.25 :
+      words.length >= 7 ? 1.12 : words.length <= 3 ? 0.9 : 1;
+    const accentPhrase = inferAccentPhrase(clause);
+    return {
+      text: clause,
+      imageId: match.id,
+      matchReason: `AI image-description match: ${match.explanation}`,
+      emotionalWeight,
+      kenBurnsDirection: sanitizeDirection(undefined, idx, 'media'),
+      beatKind: 'media',
+      focalCrop: 'full',
+      captionZone: sanitizeCaptionZone(undefined, clause, idx),
+      kicker: idx === 0 ? 'THE HOOK' : `BEAT ${String(idx + 1).padStart(2, '0')}`,
+      accentPhrase,
+      sfxCue: inferDefaultSfxCue(clause, idx, accentPhrase, 'media'),
+    };
+  });
+  const scenes = computeDynamicSceneTimings(
+    diversifyConsecutiveBeats(rawDrafts, images, pacingMode, cardTheme),
+    audioDurationMs, pauses
+  );
+  const lowConfidence = matches.filter((item) => item.confidence === 'low').length;
+  return {
+    scenes,
+    imageSummaries,
+    engineUsed,
+    fallbackNotice: lowConfidence
+      ? `Visual AI analyzed all ${images.length} images, but ${lowConfidence} of ${scenes.length} beats have low match confidence. Review those image assignments in Storyboard before export. Speech positions remain estimated from narration duration and detected pauses.`
+      : `Visual AI analyzed all ${images.length} images without needing filenames or numbers. Speech positions are estimated from narration duration and detected pauses.`,
+  };
+}
+
 function alignWithLocalHeuristic(
   cleanScript: string,
   audioDurationMs: number,
@@ -872,7 +926,7 @@ function alignWithLocalHeuristic(
   cardTheme: GraphicCardTheme
 ): AlignScenesOutput {
   const clauses = smartTokenizeScript(cleanScript, targetBeatCount);
-  const usedImageIds = new Set<string>();
+  const orderedImages = orderMediaByShotNumber(images);
   const imageSummaries: Record<string, string> = {};
 
   for (const img of images) {
@@ -892,40 +946,9 @@ function alignWithLocalHeuristic(
       .map((t) => t.replace(/[^a-z0-9]/g, ''))
       .filter(Boolean);
 
-    const expandedTokens = new Set<string>(tokens);
-    for (const tok of tokens) {
-      const mapped = ROMAN_URDU_CONCEPT_MAP[tok];
-      if (mapped) {
-        for (const m of mapped) expandedTokens.add(m);
-      }
-    }
-
-    let bestImg = images[idx % images.length];
-    let bestScore = -1;
-    let matchedKeyword = '';
-
-    for (const img of images) {
-      const nameTokens = img.originalName
-        .toLowerCase()
-        .replace(/\.[^.]+$/, '')
-        .split(/[^a-z0-9]+/)
-        .filter((t) => t.length >= 2);
-
-      let score = usedImageIds.has(img.id) ? 0 : 1.5;
-      for (const nt of nameTokens) {
-        if (expandedTokens.has(nt) || expandedTokens.has(nt + 's') || expandedTokens.has(nt.replace(/s$/, ''))) {
-          score += 6;
-          matchedKeyword = nt;
-        }
-      }
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestImg = img;
-      }
-    }
-
-    usedImageIds.add(bestImg.id);
+    // Offline mode has no computer vision. Preserve the intended shot sequence;
+    // filename keyword scoring often assigned the wrong crow, pot, and action.
+    const bestImg = selectMediaForBeat(orderedImages, idx, clauses.length);
 
     let emotionalWeight = 1.0;
     if (/[!?]/.test(clause) || /\d/.test(clause)) emotionalWeight = 1.2;
@@ -937,9 +960,7 @@ function alignWithLocalHeuristic(
     return {
       text: clause,
       imageId: bestImg.id,
-      matchReason: matchedKeyword
-        ? `Matched "${matchedKeyword}" -> ${bestImg.originalName}`
-        : `Rapid micro-beat pacing across visuals (${bestImg.originalName})`,
+      matchReason: `Offline shot order ${orderedImages.indexOf(bestImg) + 1}/${orderedImages.length}: ${bestImg.originalName} (not visual AI matching)`,
       emotionalWeight,
       kenBurnsDirection: sanitizeDirection(undefined, idx, 'media'),
       beatKind: 'media',
